@@ -1,0 +1,6 @@
+{
+  "name": "MediQuês",
+  "description": "Simplificador de bulas de remédios e gerador de e-books de saúde acessíveis para idosos e pessoas com dificuldade de leitura.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

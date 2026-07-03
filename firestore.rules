@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Primitive Definitions
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    
+    function incoming() { 
+      return request.resource.data; 
+    }
+    
+    function existing() { 
+      return resource.data; 
+    }
+    
+    function isSignedIn() { 
+      return request.auth != null; 
+    }
+    
+    function isOwner(userId) { 
+      return isSignedIn() && request.auth.uid == userId; 
+    }
+
+    // Validation Blueprint for the User entity
+    function isValidUser(data) {
+      return data.email is string 
+        && data.email.size() <= 256
+        && (data.name == null || (data.name is string && data.name.size() <= 256))
+        && data.createdAt != null
+        && (data.favoriteFolders == null || data.favoriteFolders is list)
+        && (data.favoriteEbooks == null || data.favoriteEbooks is list)
+        && (data.darkMode == null || data.darkMode is bool)
+        && (data.reminders == null || data.reminders is map)
+        && (data.myMedicines == null || data.myMedicines is list)
+        && (data.adherenceLogs == null || data.adherenceLogs is list);
+    }
+
+    // Users collection rules
+    match /users/{userId} {
+      // Path Variable Hardening (ID Poisoning Guard)
+      allow get: if isOwner(userId) && isValidId(userId);
+      
+      allow create: if isOwner(userId) 
+        && isValidId(userId)
+        && isValidUser(incoming())
+        // Temporal Integrity (Strict Timestamps)
+        && incoming().createdAt == request.time;
+        
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUser(incoming())
+        // The "Immortal Field" Rule
+        && incoming().createdAt == existing().createdAt;
+        
+      allow delete: if false; // Disallow client-side deletion
+    }
+  }
+}

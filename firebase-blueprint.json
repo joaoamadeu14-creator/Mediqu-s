@@ -1,0 +1,58 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile containing settings and favorites",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "The user's email address"
+        },
+        "name": {
+          "type": "string",
+          "description": "The user's full name"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the user account was created"
+        },
+        "favoriteFolders": {
+          "type": "array",
+          "description": "Array of folder IDs that the user has marked as favorites"
+        },
+        "favoriteEbooks": {
+          "type": "array",
+          "description": "Array of ebook keys that the user has marked as favorites"
+        },
+        "darkMode": {
+          "type": "boolean",
+          "description": "Whether the user has dark mode enabled"
+        },
+        "myMedicines": {
+          "type": "array",
+          "description": "Array of the user's custom medicines"
+        },
+        "reminders": {
+          "type": "object",
+          "description": "Map of user reminders from simple ebooks"
+        },
+        "adherenceLogs": {
+          "type": "array",
+          "description": "Array of medication adherence logs"
+        }
+      },
+      "required": [
+        "email",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Collection of user preferences and custom saved favorites mapped by user UID"
+    }
+  }
+}

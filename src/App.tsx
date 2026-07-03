@@ -39,9 +39,38 @@ import {
   Home,
   Download,
   Moon,
-  Sun
+  Sun,
+  User as UserIcon,
+  LogOut,
+  LogIn,
+  Star,
+  History,
+  Settings,
+  Trash2,
+  Plus,
+  Edit,
+  Bell,
+  Check
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import { auth, db } from './firebase';
+import { 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut,
+  User as FirebaseUser,
+  GoogleAuthProvider,
+  signInWithPopup
+} from 'firebase/auth';
+import { 
+  doc, 
+  getDoc, 
+  setDoc, 
+  updateDoc,
+  serverTimestamp
+} from 'firebase/firestore';
+
 
 // Color themes mapping
 const THEMES: Record<string, { bg: string, border: string, text: string, primary: string, accent: string }> = {
@@ -338,12 +367,36 @@ const renderSectionContent = (
   );
 };
 
+// Medication item interface
+interface MyMedicine {
+  id: string;
+  medicineName: string;
+  dose: string;
+  timesPerDay: string;
+  times: string[];
+  instructions: string;
+  sourceEbookKey?: string;
+}
+
+// Medication adherence log interface
+interface AdherenceLog {
+  id: string;
+  medicineName: string;
+  dose: string;
+  scheduledTime: string;
+  date: string; // YYYY-MM-DD
+  takenAt: string; // ISO string
+  status: 'taken' | 'missed';
+}
+
 // Route parameters interface
 interface RouteParams {
   livro?: string;
   categoria?: string;
   pagina?: number;
   novo?: boolean;
+  explorar?: boolean;
+  remedios?: boolean;
 }
 
 // Extract current route settings from URL query parameters
@@ -356,8 +409,10 @@ const getRouteFromURL = (): RouteParams => {
   const paginaStr = params.get('pagina');
   const pagina = paginaStr ? parseInt(paginaStr, 10) : undefined;
   const novo = params.get('novo') === 'true';
+  const explorar = params.get('explorar') === 'true';
+  const remedios = params.get('remedios') === 'true';
   
-  return { livro, categoria, pagina, novo };
+  return { livro, categoria, pagina, novo, explorar, remedios };
 };
 
 // Update URL query parameters based on state route params
@@ -365,6 +420,10 @@ const updateURL = (route: RouteParams) => {
   const params = new URLSearchParams();
   if (route.novo) {
     params.set('novo', 'true');
+  } else if (route.explorar) {
+    params.set('explorar', 'true');
+  } else if (route.remedios) {
+    params.set('remedios', 'true');
   } else if (route.categoria) {
     params.set('categoria', route.categoria);
   } else if (route.livro) {
@@ -398,10 +457,18 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showHome, setShowHome] = useState<boolean>(() => {
     const route = getRouteFromURL();
-    return !(route.livro || route.categoria || route.novo);
+    return !(route.livro || route.categoria || route.novo || route.explorar || route.remedios);
   });
   const [homeSearchQuery, setHomeSearchQuery] = useState('');
-  const [viewingTagResults, setViewingTagResults] = useState(false);
+  const [viewingTagResults, setViewingTagResults] = useState<boolean>(() => {
+    const route = getRouteFromURL();
+    return !!route.explorar;
+  });
+
+  const [sidebarFoldersCollapsed, setSidebarFoldersCollapsed] = useState(false);
+  const [sidebarFavoritesCollapsed, setSidebarFavoritesCollapsed] = useState(false);
+  const [sidebarHistoryCollapsed, setSidebarHistoryCollapsed] = useState(false);
+  const [sidebarAccessibilityCollapsed, setSidebarAccessibilityCollapsed] = useState(false);
 
   const normalizeString = (str: string) => {
     return str ? str.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : '';
@@ -422,6 +489,19 @@ export default function App() {
   };
 
   const handleHomeSearch = (query: string) => {
+    if (!query || !query.trim()) {
+      setSelectedPreset(null);
+      setSelectedCategory(null);
+      setViewingTagResults(true);
+      setIsCustomMode(false);
+      setShowHome(false);
+      setSearchQuery('');
+      setHomeSearchQuery('');
+      setSidebarInputVal('');
+      setSidebarOpen(true);
+      return;
+    }
+
     const mainCat = isMainTag(query);
     if (mainCat) {
       setSelectedCategory(mainCat);
@@ -637,8 +717,604 @@ export default function App() {
       const newVal = !prev;
       try {
         localStorage.setItem('dark_mode', JSON.stringify(newVal));
+        if (auth.currentUser) {
+          updateDoc(doc(db, 'users', auth.currentUser.uid), {
+            darkMode: newVal
+          }).catch(err => console.error(err));
+        }
       } catch (e) {}
       return newVal;
+    });
+  };
+
+  // Firebase Auth State
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [userName, setUserName] = useState<string>('');
+  const [authName, setAuthName] = useState<string>('');
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authModalTab, setAuthModalTab] = useState<'login' | 'signup'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authConfirmPassword, setAuthConfirmPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authSuccess, setAuthSuccess] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+
+  // Favorites State (E-books & Folders)
+  const [favoriteEbooks, setFavoriteEbooks] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('favorite_ebooks');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const [favoriteFolders, setFavoriteFolders] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('favorite_folders');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const [recentViews, setRecentViews] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('recent_views');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const [showMyMedicines, setShowMyMedicines] = useState<boolean>(() => {
+    const route = getRouteFromURL();
+    return !!route.remedios;
+  });
+
+  const [showProfile, setShowProfile] = useState<boolean>(false);
+
+  const [myMedicines, setMyMedicines] = useState<MyMedicine[]>(() => {
+    try {
+      const saved = localStorage.getItem('my_medicines');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  // Prescription editing form state
+  const [isAddingMedicine, setIsAddingMedicine] = useState(false);
+  const [editingMedicineId, setEditingMedicineId] = useState<string | null>(null);
+  const [recipeName, setRecipeName] = useState('');
+  const [recipeDose, setRecipeDose] = useState('');
+  const [recipeTimesPerDay, setRecipeTimesPerDay] = useState('1');
+  const [recipeTimes, setRecipeTimes] = useState<string[]>(['08:00']);
+  const [recipeInstructions, setRecipeInstructions] = useState('');
+
+  // Active Alarm State
+  const [activeAlarm, setActiveAlarm] = useState<{
+    id: string;
+    medicineName: string;
+    dose: string;
+    time: string;
+    instructions: string;
+  } | null>(null);
+
+  // Keep track of triggered alarms
+  const [triggeredAlarms, setTriggeredAlarms] = useState<string[]>([]);
+
+  // Adherence Logs State
+  const [adherenceLogs, setAdherenceLogs] = useState<AdherenceLog[]>(() => {
+    try {
+      const saved = localStorage.getItem('adherence_logs');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const saveAdherenceLogs = async (updatedLogs: AdherenceLog[]) => {
+    setAdherenceLogs(updatedLogs);
+    try {
+      localStorage.setItem('adherence_logs', JSON.stringify(updatedLogs));
+      if (auth.currentUser) {
+        await updateDoc(doc(db, 'users', auth.currentUser.uid), {
+          adherenceLogs: updatedLogs
+        });
+      }
+    } catch (e) {
+      console.error('Error saving adherence logs:', e);
+    }
+  };
+
+  const logDoseTaken = async (medicineName: string, dose: string, scheduledTime: string) => {
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    
+    // Check if this specific dose is already logged as taken today
+    const isAlreadyLogged = adherenceLogs.some(
+      log => log.medicineName === medicineName && 
+             log.scheduledTime === scheduledTime && 
+             log.date === dateStr &&
+             log.status === 'taken'
+    );
+    
+    if (isAlreadyLogged) return;
+
+    const newLog: AdherenceLog = {
+      id: `log_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      medicineName,
+      dose: dose || 'Dose padrão',
+      scheduledTime,
+      date: dateStr,
+      takenAt: now.toISOString(),
+      status: 'taken'
+    };
+
+    const updatedLogs = [newLog, ...adherenceLogs];
+    await saveAdherenceLogs(updatedLogs);
+  };
+
+  const getMonthlyCompliance = () => {
+    if (myMedicines.length === 0 && Object.keys(reminders).length === 0) {
+      return 100;
+    }
+
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth();
+
+    let startDate = new Date(currentYear, currentMonth, 1);
+    
+    if (adherenceLogs.length > 0) {
+      const logDates = adherenceLogs.map(log => {
+        // Ensure date is parsed correctly in local timezone
+        const [y, m, d] = log.date.split('-').map(Number);
+        return new Date(y, m - 1, d);
+      });
+      const earliestLogDate = new Date(Math.min(...logDates.map(d => d.getTime())));
+      
+      if (earliestLogDate > startDate && earliestLogDate <= now) {
+        startDate = new Date(earliestLogDate.getFullYear(), earliestLogDate.getMonth(), earliestLogDate.getDate());
+      }
+    } else {
+      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    }
+
+    let totalScheduled = 0;
+    let totalTaken = 0;
+
+    const days: string[] = [];
+    let tempDate = new Date(startDate);
+    
+    while (tempDate <= now) {
+      const yyyy = tempDate.getFullYear();
+      const mm = String(tempDate.getMonth() + 1).padStart(2, '0');
+      const dd = String(tempDate.getDate()).padStart(2, '0');
+      days.push(`${yyyy}-${mm}-${dd}`);
+      tempDate.setDate(tempDate.getDate() + 1);
+    }
+
+    days.forEach(day => {
+      myMedicines.forEach(med => {
+        totalScheduled += med.times.length;
+      });
+      totalScheduled += Object.keys(reminders).length;
+    });
+
+    adherenceLogs.forEach(log => {
+      if (log.status === 'taken') {
+        const [y, m, d] = log.date.split('-').map(Number);
+        const logDate = new Date(y, m - 1, d);
+        const startCompare = new Date(startDate);
+        logDate.setHours(0,0,0,0);
+        startCompare.setHours(0,0,0,0);
+        const endCompare = new Date(now);
+        endCompare.setHours(23,59,59,999);
+        
+        if (logDate >= startCompare && logDate <= endCompare) {
+          totalTaken++;
+        }
+      }
+    });
+
+    if (totalScheduled === 0) return 100;
+    return Math.min(100, Math.round((totalTaken / totalScheduled) * 100));
+  };
+
+  const getTodaysScheduledDoses = () => {
+    const doses: Array<{
+      medicineName: string;
+      dose: string;
+      time: string;
+      type: 'custom' | 'ebook';
+      id: string;
+    }> = [];
+
+    // 1. From custom medicines (myMedicines)
+    myMedicines.forEach(med => {
+      med.times.forEach(t => {
+        doses.push({
+          medicineName: med.medicineName,
+          dose: med.dose || 'Dose padrão',
+          time: t,
+          type: 'custom',
+          id: `${med.id}_${t}`
+        });
+      });
+    });
+
+    // 2. From book reminders
+    Object.entries(reminders).forEach(([key, time]) => {
+      const idx = key.indexOf('_');
+      const medicineName = idx !== -1 ? key.substring(0, idx) : 'Medicamento';
+      const sectionTitle = idx !== -1 ? key.substring(idx + 1) : key;
+      doses.push({
+        medicineName: sectionTitle,
+        dose: `Lembrete do livro de ${medicineName}`,
+        time: time as string,
+        type: 'ebook',
+        id: `${key}_${time}`
+      });
+    });
+
+    // Sort chronologically by time
+    return doses.sort((a, b) => a.time.localeCompare(b.time));
+  };
+
+  const isDoseTakenToday = (medicineName: string, time: string) => {
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    return adherenceLogs.some(
+      log => log.medicineName.toLowerCase() === medicineName.toLowerCase() && 
+             log.scheduledTime === time && 
+             log.date === todayStr &&
+             log.status === 'taken'
+    );
+  };
+
+  const getDoseTakenTimeToday = (medicineName: string, time: string) => {
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const log = adherenceLogs.find(
+      log => log.medicineName.toLowerCase() === medicineName.toLowerCase() && 
+             log.scheduledTime === time && 
+             log.date === todayStr &&
+             log.status === 'taken'
+    );
+    if (!log) return '';
+    try {
+      const d = new Date(log.takenAt);
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    } catch (e) {
+      return '';
+    }
+  };
+
+  const saveMyMedicines = async (updatedMedicines: MyMedicine[]) => {
+    setMyMedicines(updatedMedicines);
+    try {
+      localStorage.setItem('my_medicines', JSON.stringify(updatedMedicines));
+      if (auth.currentUser) {
+        await updateDoc(doc(db, 'users', auth.currentUser.uid), {
+          myMedicines: updatedMedicines
+        });
+      }
+    } catch (e) {
+      console.error('Error saving medicines:', e);
+    }
+  };
+
+  // Reminders State (Medication Alarms)
+  const [reminders, setReminders] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem('medication_reminders');
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      return {};
+    }
+  });
+
+  const saveReminder = async (key: string, time: string) => {
+    const updated = { ...reminders };
+    if (time) {
+      updated[key] = time;
+    } else {
+      delete updated[key];
+    }
+    setReminders(updated);
+    try {
+      localStorage.setItem('medication_reminders', JSON.stringify(updated));
+      if (auth.currentUser) {
+        await updateDoc(doc(db, 'users', auth.currentUser.uid), {
+          reminders: updated
+        });
+      }
+
+      // Automatically import to myMedicines list
+      if (time && currentEbook) {
+        const alreadyExists = myMedicines.some(m => m.medicineName.toLowerCase() === currentEbook.medicineName.toLowerCase());
+        if (!alreadyExists) {
+          const newMed: MyMedicine = {
+            id: 'import_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+            medicineName: currentEbook.medicineName,
+            dose: 'Ver posologia no livrinho',
+            timesPerDay: '1',
+            times: [time],
+            instructions: 'Importado automaticamente do guia de posologia do livro.',
+            sourceEbookKey: selectedPreset
+          };
+          await saveMyMedicines([...myMedicines, newMed]);
+        } else {
+          // Update the times if medicine already exists in list
+          const updatedMeds = myMedicines.map(m => {
+            if (m.medicineName.toLowerCase() === currentEbook.medicineName.toLowerCase()) {
+              const updatedTimes = m.times.includes(time) ? m.times : [...m.times, time].sort();
+              return {
+                ...m,
+                times: updatedTimes,
+                timesPerDay: updatedTimes.length.toString()
+              };
+            }
+            return m;
+          });
+          await saveMyMedicines(updatedMeds);
+        }
+      }
+    } catch (e) {
+      console.error('Error saving reminder:', e);
+    }
+  };
+
+  const isPosologySection = (section: any, page: any) => {
+    if (!section || !page) return false;
+    const titleLower = (section.title || '').toLowerCase();
+    const contentLower = (section.content || '').toLowerCase();
+    const pageTitleLower = (page.title || '').toLowerCase();
+    
+    return (
+      section.icon === 'Pill' ||
+      section.icon === 'Clock' ||
+      titleLower.includes('posologia') ||
+      titleLower.includes('como tomar') ||
+      titleLower.includes('dose') ||
+      titleLower.includes('dosagem') ||
+      contentLower.includes('posologia') ||
+      contentLower.includes('como tomar') ||
+      contentLower.includes('dose') ||
+      contentLower.includes('dosagem') ||
+      pageTitleLower.includes('posologia') ||
+      pageTitleLower.includes('como tomar') ||
+      pageTitleLower.includes('remediose')
+    );
+  };
+
+  // Track Auth Changes and Sync
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+      if (currentUser) {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
+          if (userDoc.exists()) {
+            const data = userDoc.data();
+            if (data.name) {
+              setUserName(data.name);
+            } else {
+              setUserName(currentUser.displayName || '');
+            }
+            if (data.favoriteEbooks) {
+              setFavoriteEbooks(data.favoriteEbooks);
+              localStorage.setItem('favorite_ebooks', JSON.stringify(data.favoriteEbooks));
+            }
+            if (data.favoriteFolders) {
+              setFavoriteFolders(data.favoriteFolders);
+              localStorage.setItem('favorite_folders', JSON.stringify(data.favoriteFolders));
+            }
+            if (data.reminders) {
+              setReminders(data.reminders);
+              localStorage.setItem('medication_reminders', JSON.stringify(data.reminders));
+            }
+            if (data.myMedicines) {
+              setMyMedicines(data.myMedicines);
+              localStorage.setItem('my_medicines', JSON.stringify(data.myMedicines));
+            }
+            if (data.adherenceLogs) {
+              setAdherenceLogs(data.adherenceLogs);
+              localStorage.setItem('adherence_logs', JSON.stringify(data.adherenceLogs));
+            }
+            if (typeof data.darkMode === 'boolean') {
+              setDarkMode(data.darkMode);
+              localStorage.setItem('dark_mode', JSON.stringify(data.darkMode));
+            }
+          } else {
+            // Document does not exist yet, bootstrap it
+            await setDoc(doc(db, 'users', currentUser.uid), {
+              email: currentUser.email || '',
+              name: currentUser.displayName || '',
+              createdAt: serverTimestamp(),
+              favoriteFolders: favoriteFolders,
+              favoriteEbooks: favoriteEbooks,
+              reminders: reminders,
+              myMedicines: myMedicines,
+              adherenceLogs: adherenceLogs,
+              darkMode: darkMode
+            });
+            setUserName(currentUser.displayName || '');
+          }
+        } catch (e) {
+          console.error("Error fetching user data from Firestore:", e);
+        }
+      } else {
+        setUserName('');
+        setAuthName('');
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  const handleSignUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+    if (!authName.trim()) {
+      setAuthError('Por favor, informe seu Nome Completo.');
+      return;
+    }
+    if (!authEmail || !authPassword) {
+      setAuthError('Por favor, preencha todos os campos.');
+      return;
+    }
+    if (authPassword !== authConfirmPassword) {
+      setAuthError('As senhas não coincidem.');
+      return;
+    }
+    if (authPassword.length < 6) {
+      setAuthError('A senha deve ter pelo menos 6 caracteres.');
+      return;
+    }
+    setAuthSubmitting(true);
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      const newUser = userCredential.user;
+      
+      await setDoc(doc(db, 'users', newUser.uid), {
+        email: authEmail,
+        name: authName.trim(),
+        createdAt: serverTimestamp(),
+        favoriteFolders: favoriteFolders,
+        favoriteEbooks: favoriteEbooks,
+        reminders: reminders,
+        myMedicines: myMedicines,
+        adherenceLogs: adherenceLogs,
+        darkMode: darkMode
+      });
+      setUserName(authName.trim());
+
+      setAuthSuccess('Cadastro realizado com sucesso!');
+      setTimeout(() => {
+        setAuthModalOpen(false);
+        setAuthName('');
+        setAuthEmail('');
+        setAuthPassword('');
+        setAuthConfirmPassword('');
+        setAuthSuccess('');
+      }, 1500);
+    } catch (err: any) {
+      console.error("Sign up error:", err);
+      if (err.code === 'auth/email-already-in-use') {
+        setAuthError('Este e-mail já está em uso.');
+      } else if (err.code === 'auth/invalid-email') {
+        setAuthError('E-mail inválido.');
+      } else if (err.code === 'auth/weak-password') {
+        setAuthError('Senha muito fraca.');
+      } else if (err.code === 'auth/operation-not-allowed') {
+        setAuthError('O método de cadastro por e-mail/senha não está ativo no Firebase. Ative "E-mail/senha" em Authentication > Sign-in method no seu Console do Firebase.');
+      } else {
+        setAuthError('Ocorreu um erro ao cadastrar. Verifique a configuração do seu Firebase.');
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setAuthError('');
+    setAuthSuccess('');
+    setAuthSubmitting(true);
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+      setAuthSuccess('Login com Google realizado com sucesso!');
+      setTimeout(() => {
+        setAuthModalOpen(false);
+        setAuthSuccess('');
+      }, 1500);
+    } catch (err: any) {
+      console.error("Google sign in error:", err);
+      if (err.code === 'auth/popup-closed-by-user') {
+        setAuthError('O login com Google foi cancelado.');
+      } else if (err.code === 'auth/operation-not-allowed') {
+        setAuthError('O login com Google não está ativo no seu projeto Firebase. Ative o provedor "Google" em Authentication > Sign-in method no seu Console do Firebase.');
+      } else {
+        setAuthError('Ocorreu um erro ao fazer login com o Google.');
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+    if (!authEmail || !authPassword) {
+      setAuthError('Por favor, preencha todos os campos.');
+      return;
+    }
+    setAuthSubmitting(true);
+    try {
+      await signInWithEmailAndPassword(auth, authEmail, authPassword);
+      setAuthSuccess('Login realizado com sucesso!');
+      setTimeout(() => {
+        setAuthModalOpen(false);
+        setAuthEmail('');
+        setAuthPassword('');
+        setAuthSuccess('');
+      }, 1500);
+    } catch (err: any) {
+      console.error("Login error:", err);
+      if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        setAuthError('E-mail ou senha incorretos.');
+      } else {
+        setAuthError('Ocorreu um erro ao fazer login. Tente novamente.');
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setFavoriteFolders([]);
+      setFavoriteEbooks([]);
+      localStorage.removeItem('favorite_folders');
+      localStorage.removeItem('favorite_ebooks');
+    } catch (e) {
+      console.error("Error signing out:", e);
+    }
+  };
+
+  const toggleFavoriteEbook = (key: string) => {
+    if (!key) return;
+    setFavoriteEbooks(prev => {
+      const updated = prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key];
+      localStorage.setItem('favorite_ebooks', JSON.stringify(updated));
+      if (auth.currentUser) {
+        updateDoc(doc(db, 'users', auth.currentUser.uid), {
+          favoriteEbooks: updated
+        }).catch(err => console.error(err));
+      }
+      return updated;
+    });
+  };
+
+  const toggleFavoriteFolder = (id: string) => {
+    if (!id) return;
+    setFavoriteFolders(prev => {
+      const updated = prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id];
+      localStorage.setItem('favorite_folders', JSON.stringify(updated));
+      if (auth.currentUser) {
+        updateDoc(doc(db, 'users', auth.currentUser.uid), {
+          favoriteFolders: updated
+        }).catch(err => console.error(err));
+      }
+      return updated;
     });
   };
 
@@ -671,43 +1347,6 @@ export default function App() {
   const [paywallModalMedicine, setPaywallModalMedicine] = useState<string | null>(null);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [paymentSuccess, setPaymentSuccess] = useState(false);
-
-  // Favorites State (E-books & Folders)
-  const [favoriteEbooks, setFavoriteEbooks] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('favorite_ebooks');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
-  });
-
-  const [favoriteFolders, setFavoriteFolders] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('favorite_folders');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
-  });
-
-  const toggleFavoriteEbook = (key: string) => {
-    if (!key) return;
-    setFavoriteEbooks(prev => {
-      const updated = prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key];
-      localStorage.setItem('favorite_ebooks', JSON.stringify(updated));
-      return updated;
-    });
-  };
-
-  const toggleFavoriteFolder = (id: string) => {
-    if (!id) return;
-    setFavoriteFolders(prev => {
-      const updated = prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id];
-      localStorage.setItem('favorite_folders', JSON.stringify(updated));
-      return updated;
-    });
-  };
 
   // Current E-book state
   const [currentEbook, setCurrentEbook] = useState<Ebook | null>(null);
@@ -842,11 +1481,31 @@ export default function App() {
     setIsCustomMode(false);
     setSelectedCategory(null);
     setViewingTagResults(false);
+    setShowHome(false);
+    setShowProfile(false);
+    setShowMyMedicines(false);
     loadPresetDetails(key);
+    
+    // Automatically expand the folder of the selected preset
+    const matchedPreset = presets.find(p => p.key === key);
+    if (matchedPreset && matchedPreset.category) {
+      setOpenFolders(prev => ({ ...prev, [matchedPreset.category]: true }));
+    }
+
     // On mobile, automatically collapse sidebar to show the ebook immediately
     if (window.innerWidth < 768) {
       setSidebarOpen(false);
     }
+
+    // Update recently viewed history
+    setRecentViews(prev => {
+      const filtered = prev.filter(k => k !== key);
+      const updated = [key, ...filtered].slice(0, 5); // Keep top 5
+      try {
+        localStorage.setItem('recent_views', JSON.stringify(updated));
+      } catch (e) {}
+      return updated;
+    });
   };
 
   // Text-To-Speech integration
@@ -963,16 +1622,37 @@ export default function App() {
 
   // Apply route settings to state variables
   const applyRoute = async (route: RouteParams) => {
-    if (route.novo) {
+    setShowProfile(false);
+    if (route.remedios) {
+      setShowMyMedicines(true);
+      setShowHome(false);
+      setIsCustomMode(false);
+      setSelectedCategory(null);
+      setViewingTagResults(false);
+      setCurrentEbook(null);
+    } else if (route.explorar) {
+      setShowMyMedicines(false);
+      setViewingTagResults(true);
+      setShowHome(false);
+      setIsCustomMode(false);
+      setSelectedCategory(null);
+      setSearchQuery('');
+    } else if (route.novo) {
+      setShowMyMedicines(false);
+      setViewingTagResults(false);
       setIsCustomMode(true);
       setShowHome(false);
       setSelectedCategory(null);
     } else if (route.categoria) {
+      setShowMyMedicines(false);
+      setViewingTagResults(false);
       setSelectedCategory(route.categoria);
       setShowHome(false);
       setIsCustomMode(false);
       setOpenFolders(prev => ({ ...prev, [route.categoria!]: true }));
     } else if (route.livro) {
+      setShowMyMedicines(false);
+      setViewingTagResults(false);
       setSelectedPreset(route.livro);
       setShowHome(false);
       setIsCustomMode(false);
@@ -1004,9 +1684,12 @@ export default function App() {
         setIsLoading(false);
       }
     } else {
+      setShowMyMedicines(false);
       setShowHome(true);
       setSelectedCategory(null);
       setIsCustomMode(false);
+      setViewingTagResults(false);
+      setCurrentEbook(null);
     }
   };
 
@@ -1043,8 +1726,12 @@ export default function App() {
     const route: RouteParams = {};
     if (showHome) {
       // Home has no parameters
+    } else if (showMyMedicines) {
+      route.remedios = true;
     } else if (isCustomMode) {
       route.novo = true;
+    } else if (viewingTagResults) {
+      route.explorar = true;
     } else if (selectedCategory) {
       route.categoria = selectedCategory;
     } else if (selectedPreset) {
@@ -1055,7 +1742,95 @@ export default function App() {
     }
     
     updateURL(route);
-  }, [showHome, isCustomMode, selectedCategory, selectedPreset, currentPageIndex]);
+  }, [showHome, showMyMedicines, isCustomMode, selectedCategory, selectedPreset, currentPageIndex, viewingTagResults]);
+
+  const playChime = () => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      
+      const playTone = (freq: number, start: number, duration: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        
+        osc.frequency.setValueAtTime(freq, start);
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(0.15, start + 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+        
+        osc.start(start);
+        osc.stop(start + duration);
+      };
+
+      const now = ctx.currentTime;
+      playTone(659.25, now, 0.4); // E5
+      playTone(880.00, now + 0.2, 0.6); // A5
+    } catch (e) {
+      console.warn('Audio play failed:', e);
+    }
+  };
+
+  // Real-Time Alarm Clock Check
+  useEffect(() => {
+    const checkAlarms = () => {
+      const now = new Date();
+      const HH = String(now.getHours()).padStart(2, '0');
+      const MM = String(now.getMinutes()).padStart(2, '0');
+      const timeStr = `${HH}:${MM}`;
+      
+      const currentMinuteKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}_${timeStr}`;
+
+      // 1. Check reminders from ebooks
+      Object.entries(reminders).forEach(([key, alarmTime]) => {
+        if (alarmTime === timeStr) {
+          const alarmId = `reminder_${key}_${currentMinuteKey}`;
+          if (!triggeredAlarms.includes(alarmId)) {
+            const index = key.indexOf('_');
+            const medName = index !== -1 ? key.substring(0, index) : 'Medicamento';
+            const secTitle = index !== -1 ? key.substring(index + 1) : key;
+
+            setTriggeredAlarms(prev => [...prev, alarmId]);
+            setActiveAlarm({
+              id: alarmId,
+              medicineName: medName,
+              dose: 'Dose especificada no livrinho (' + secTitle + ')',
+              time: alarmTime,
+              instructions: 'Lembrete configurado através do E-book interativo.'
+            });
+            playChime();
+          }
+        }
+      });
+
+      // 2. Check myMedicines recipe times
+      myMedicines.forEach(med => {
+        med.times.forEach(alarmTime => {
+          if (alarmTime === timeStr) {
+            const alarmId = `medicine_${med.id}_${alarmTime}_${currentMinuteKey}`;
+            if (!triggeredAlarms.includes(alarmId)) {
+              setTriggeredAlarms(prev => [...prev, alarmId]);
+              setActiveAlarm({
+                id: alarmId,
+                medicineName: med.medicineName,
+                dose: med.dose,
+                time: alarmTime,
+                instructions: med.instructions
+              });
+              playChime();
+            }
+          }
+        });
+      });
+    };
+
+    // Check immediately and then every 10 seconds
+    checkAlarms();
+    const interval = setInterval(checkAlarms, 10000);
+    return () => clearInterval(interval);
+  }, [reminders, myMedicines, triggeredAlarms]);
 
   const downloadEbookPDF = () => {
     if (!currentEbook) return;
@@ -1397,6 +2172,198 @@ export default function App() {
     doc.save(filename);
   };
 
+  const downloadMedicinesPDF = () => {
+    if (myMedicines.length === 0) return;
+    
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 15;
+    const contentWidth = pageWidth - (margin * 2);
+
+    const themeColors: Record<string, { primary: [number, number, number], dark: [number, number, number], light: [number, number, number], text: [number, number, number] }> = {
+      emerald: {
+        primary: [16, 185, 129], // emerald-500
+        dark: [6, 95, 70],       // emerald-800
+        light: [240, 253, 244],  // emerald-50
+        text: [6, 78, 59]         // emerald-900
+      },
+      green: {
+        primary: [34, 197, 94],  // green-500
+        dark: [20, 83, 45],       // green-800
+        light: [240, 253, 244],  // green-50
+        text: [20, 70, 35]        // green-900
+      },
+      amber: {
+        primary: [245, 158, 11],  // amber-500
+        dark: [120, 53, 4],       // amber-800
+        light: [254, 243, 199],  // amber-100
+        text: [120, 53, 4]        // amber-950
+      },
+      rose: {
+        primary: [244, 63, 94],   // rose-500
+        dark: [159, 18, 57],      // rose-800
+        light: [255, 241, 242],  // rose-50
+        text: [136, 19, 55]       // rose-900
+      },
+      indigo: {
+        primary: [79, 70, 229],   // indigo-600
+        dark: [49, 46, 129],      // indigo-900
+        light: [238, 242, 255],  // indigo-50
+        text: [49, 46, 129]       // indigo-950
+      },
+      blue: {
+        primary: [37, 99, 235],   // blue-600
+        dark: [30, 58, 138],      // blue-900
+        light: [239, 246, 255],  // blue-50
+        text: [30, 58, 138]       // blue-950
+      }
+    };
+
+    const activeThemeColors = themeColors[themeKey] || themeColors.indigo;
+    let pageCount = 1;
+
+    const drawPageDecoration = (pNum: number) => {
+      // Background canvas (slate-50)
+      doc.setFillColor(248, 250, 252);
+      doc.rect(0, 0, pageWidth, pageHeight, 'F');
+
+      // Card Container Box
+      doc.setFillColor(255, 255, 255);
+      doc.setDrawColor(226, 232, 240); // slate-200
+      doc.setLineWidth(0.4);
+      doc.roundedRect(margin, margin, contentWidth, pageHeight - (margin * 2), 4, 4, 'FD');
+
+      // Header inside the card container
+      doc.setFont('Helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(148, 163, 184); // slate-400
+      doc.text("MediQuês • Minha Receita & Medicamentos", margin + 6, margin + 8);
+      
+      const dateStr = new Date().toLocaleDateString('pt-BR');
+      doc.text(`Gerado em ${dateStr}`, margin + contentWidth - 6 - doc.getTextWidth(`Gerado em ${dateStr}`), margin + 8);
+
+      // Accent separator line
+      doc.setDrawColor(241, 245, 249);
+      doc.setLineWidth(0.2);
+      doc.line(margin + 6, margin + 11, margin + contentWidth - 6, margin + 11);
+
+      // Footer page number and copyright inside the card container
+      doc.setFont('Helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(148, 163, 184);
+      doc.text("Aviso: Siga sempre as orientações do seu médico e farmacêutico antes de fazer alterações na terapia.", margin + 6, pageHeight - margin - 6);
+      
+      const pageStr = `Página ${pNum}`;
+      doc.text(pageStr, margin + contentWidth - 6 - doc.getTextWidth(pageStr), pageHeight - margin - 6);
+    };
+
+    // Draw first page decoration
+    drawPageDecoration(pageCount);
+
+    let currentY = margin + 18;
+
+    // Title of the Recipe
+    doc.setFont('Helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.setTextColor(activeThemeColors.dark[0], activeThemeColors.dark[1], activeThemeColors.dark[2]);
+    doc.text("MINHA LISTA DE MEDICAMENTOS", margin + 6, currentY);
+    currentY += 6;
+
+    // Subtitle / Patient details
+    doc.setFont('Helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(71, 85, 105); // slate-600
+    const patientName = userName || (user ? (user.displayName || user.email || 'Usuário do MediQuês') : 'Usuário do MediQuês');
+    const subTitleStr = `Paciente: ${patientName}`;
+    doc.text(subTitleStr, margin + 6, currentY);
+    currentY += 8;
+
+    // Accent line below title
+    doc.setFillColor(activeThemeColors.primary[0], activeThemeColors.primary[1], activeThemeColors.primary[2]);
+    doc.rect(margin + 6, currentY, 40, 1.5, 'F');
+    currentY += 10;
+
+    myMedicines.forEach((med, idx) => {
+      const labelDose = `Dose: ${med.dose || 'Sob demanda'}`;
+      const labelFrequency = `Frequência: ${med.timesPerDay === 'Outro' ? 'Sob demanda / Conforme necessário' : `${med.timesPerDay}x ao dia`}`;
+      const labelTimes = med.times && med.times.length > 0 ? `Horários: ${med.times.join('  •  ')}` : '';
+      
+      const wrappedInstructions = doc.splitTextToSize(`Instruções: ${med.instructions || 'Tomar conforme orientação médica.'}`, contentWidth - 20);
+      const instructionsHeight = wrappedInstructions.length * 4.5;
+      const cardHeight = 22 + instructionsHeight;
+
+      // Check if we need a new page
+      if (currentY + cardHeight > pageHeight - margin - 15) {
+        doc.addPage();
+        pageCount++;
+        drawPageDecoration(pageCount);
+        currentY = margin + 18;
+      }
+
+      // Draw Card background
+      doc.setFillColor(252, 253, 255);
+      doc.setDrawColor(226, 232, 240); // slate-200
+      doc.setLineWidth(0.35);
+      doc.roundedRect(margin + 6, currentY, contentWidth - 12, cardHeight, 3, 3, 'FD');
+
+      // Left Accent Strip (vertical bar of primary color)
+      doc.setFillColor(activeThemeColors.primary[0], activeThemeColors.primary[1], activeThemeColors.primary[2]);
+      doc.rect(margin + 6, currentY, 1.5, cardHeight, 'F');
+
+      let itemY = currentY + 6;
+
+      // 1. Medicine Name
+      doc.setFont('Helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(30, 41, 59); // slate-800
+      doc.text(`${idx + 1}. ${med.medicineName}`, margin + 11, itemY);
+
+      // Dose Badge text on the right
+      doc.setFont('Helvetica', 'bold');
+      doc.setFontSize(9.5);
+      doc.setTextColor(activeThemeColors.dark[0], activeThemeColors.dark[1], activeThemeColors.dark[2]);
+      const doseWidth = doc.getTextWidth(labelDose);
+      doc.text(labelDose, margin + contentWidth - 12 - doseWidth, itemY);
+
+      itemY += 6;
+
+      // 2. Frequency & Horários
+      doc.setFont('Helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(71, 85, 105); // slate-600
+      doc.text(labelFrequency, margin + 11, itemY);
+
+      if (labelTimes) {
+        doc.setFont('Helvetica', 'bold');
+        doc.setTextColor(activeThemeColors.primary[0], activeThemeColors.primary[1], activeThemeColors.primary[2]);
+        const timesWidth = doc.getTextWidth(labelTimes);
+        doc.text(labelTimes, margin + contentWidth - 12 - timesWidth, itemY);
+      }
+
+      itemY += 6;
+
+      // 3. Instructions (wrapped text)
+      doc.setFont('Helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(100, 116, 139); // slate-500
+      wrappedInstructions.forEach((line: string) => {
+        doc.text(line, margin + 11, itemY);
+        itemY += 4.5;
+      });
+
+      currentY += cardHeight + 6; // Spacing to next card
+    });
+
+    const filenameOutput = `Minha_Receita_MediQues_${patientName.replace(/[^a-zA-Z0-9]/g, "_")}.pdf`;
+    doc.save(filenameOutput);
+  };
+
   // Clean speaking on unmount
   useEffect(() => {
     return () => {
@@ -1491,11 +2458,137 @@ export default function App() {
     return nameMatch || subtitleMatch || tagsMatch;
   });
 
+  const getSimilarRecommendations = (query: string, currentResults: any[]): any[] => {
+    const norm = normalizeString(query).trim();
+    if (!norm) return [];
+
+    const recommendationRules = [
+      {
+        keywords: ["sartana", "sartanas", "bra", "bras", "losartana", "valsartana", "olmesartana", "telmisartana", "candesartana", "irbesartana"],
+        recommendKeys: ["hipertensao_eca"]
+      },
+      {
+        keywords: ["ieca", "iecas", "pril", "prils", "captopril", "enalapril", "ramipril", "lisinopril"],
+        recommendKeys: ["hipertensao_bra"]
+      },
+      {
+        keywords: ["metformina", "glifage", "glicose", "glicemia"],
+        recommendKeys: ["diabetes_sglt2"]
+      },
+      {
+        keywords: ["glifozina", "glifozinas", "gliflozina", "gliflozinas", "sglt2", "dapagliflozina", "empagliflozina", "xigduo", "urina"],
+        recommendKeys: ["diabetes_metformina"]
+      },
+      {
+        keywords: ["estatina", "estatinas", "sinvastatina", "atorvastatina", "rosuvastatina", "colesterol", "colesterol alto"],
+        recommendKeys: ["colesterol_fibratos"]
+      },
+      {
+        keywords: ["fibrato", "fibratos", "triglicerideo", "triglicerideos", "genfibrozila", "fenofibrato"],
+        recommendKeys: ["colesterol_estatinas"]
+      }
+    ];
+
+    const recommendedKeys: string[] = [];
+    
+    recommendationRules.forEach(rule => {
+      const isKeywordMatch = rule.keywords.some(keyword => {
+        const nk = normalizeString(keyword);
+        return norm.includes(nk) || nk.includes(norm);
+      });
+      if (isKeywordMatch) {
+        rule.recommendKeys.forEach(k => {
+          if (!recommendedKeys.includes(k)) {
+            recommendedKeys.push(k);
+          }
+        });
+      }
+    });
+
+    if (currentResults.length > 0) {
+      currentResults.forEach(res => {
+        const cat = res.category;
+        if (cat) {
+          presets.forEach(p => {
+            if (p.category === cat && p.key !== res.key && !currentResults.some(cr => cr.key === p.key)) {
+              if (!recommendedKeys.includes(p.key)) {
+                recommendedKeys.push(p.key);
+              }
+            }
+          });
+        }
+      });
+    }
+
+    const filteredRecKeys = recommendedKeys.filter(key => !currentResults.some(cr => cr.key === key));
+
+    return presets.filter(p => filteredRecKeys.includes(p.key));
+  };
+
+  const renderUserMenu = () => {
+    return (
+      <div className="shrink-0 flex items-center gap-2">
+        {user ? (
+          <div className="flex items-center gap-3 bg-white dark:bg-slate-900 border border-slate-200/50 dark:border-slate-800 px-3 py-1.5 rounded-full shadow-xs">
+            <div className="flex flex-col items-end text-right">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Bem vindo de volta,</span>
+              <span className="text-xs font-extrabold text-slate-700 dark:text-slate-200 max-w-[120px] xs:max-w-[180px] truncate">
+                {userName || user.displayName || user.email?.split('@')[0] || 'Usuário'}
+              </span>
+            </div>
+            
+            {/* Foto de Perfil ou Inicial automática */}
+            <div className="shrink-0">
+              {user.photoURL ? (
+                <img 
+                  src={user.photoURL} 
+                  alt="Foto de perfil" 
+                  referrerPolicy="no-referrer"
+                  className="w-8 h-8 rounded-full object-cover border border-indigo-500/30"
+                />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-indigo-600 dark:bg-indigo-500 text-white flex items-center justify-center font-black text-xs uppercase shadow-sm">
+                  {(userName || user.displayName || user.email || 'U')[0]}
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={handleSignOut}
+              className="p-1.5 rounded-full hover:bg-rose-50 dark:hover:bg-rose-950/20 text-slate-450 hover:text-rose-500 transition-all cursor-pointer"
+              title="Sair da Conta"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setAuthModalTab('login');
+                setAuthModalOpen(true);
+              }}
+              className="px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider bg-indigo-600 hover:bg-indigo-700 text-white border border-indigo-500 transition-all cursor-pointer shadow-md shadow-indigo-600/10"
+            >
+              Entrar
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div id="clarifarma-app" className={`min-h-screen ${styleConfig.containerBg} font-sans ${darkMode ? 'dark' : ''} ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-800'} flex flex-col ${showHome ? 'justify-center items-center' : 'md:flex-row'} overflow-x-hidden transition-all duration-300`}>
       
       {showHome ? (
-        <div className="flex-1 flex flex-col items-center justify-center max-w-3xl w-full text-center space-y-10 my-auto p-4 md:p-8 animate-in fade-in duration-300">
+        <div className="flex-1 flex flex-col w-full relative min-h-screen">
+          {/* Top Navbar */}
+          <header className="w-full max-w-7xl mx-auto px-6 py-4 flex justify-end items-center z-10 shrink-0">
+            {renderUserMenu()}
+          </header>
+
+          <div className="flex-1 flex flex-col items-center justify-center max-w-3xl w-full text-center space-y-10 mx-auto px-4 pb-12 animate-in fade-in duration-300">
           
           {/* Brand Logo and Site Name */}
           <div className="flex flex-col items-center gap-4">
@@ -1554,7 +2647,7 @@ export default function App() {
               onClick={() => handleHomeSearch(homeSearchQuery)}
               className="absolute right-2 top-1/2 -translate-y-1/2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-6 py-2.5 md:py-3.5 rounded-xl text-sm md:text-base transition-all shadow-md cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
             >
-              Buscar
+              {!homeSearchQuery || !homeSearchQuery.trim() ? 'Explorar' : 'Buscar'}
             </button>
           </div>
 
@@ -1571,7 +2664,7 @@ export default function App() {
                 <button
                   key={item.label}
                   onClick={() => handleHomeSearch(item.query)}
-                  className="px-4 py-2 rounded-xl text-xs font-bold transition-all border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-850 text-slate-600 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white hover:border-slate-300 dark:hover:border-slate-700 hover:scale-[1.02] cursor-pointer shadow-xs"
+                  className="px-4 py-2 rounded-xl text-xs font-bold transition-all border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-850 text-slate-600 dark:text-slate-400 cursor-pointer"
                 >
                   {item.label}
                 </button>
@@ -1579,184 +2672,229 @@ export default function App() {
             </div>
           </div>
 
-          {/* Meus Guias Section */}
-          <div className="w-full max-w-2xl space-y-4 pt-4 border-t border-slate-100 dark:border-slate-900 text-left">
-            <div className="flex items-center gap-2">
-              <Heart className="w-4 h-4 text-rose-500 fill-rose-500" />
-              <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest block">Meus Guias</h3>
+          {/* Main 3-Column Section */}
+          <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 border-t border-slate-100 dark:border-slate-900 text-left">
+            {/* Column 1: Meus Favoritos */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Star className="w-4 h-4 text-amber-500 fill-amber-500 animate-pulse" />
+                <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest block">Meus Favoritos</h3>
+              </div>
+              
+              {favoriteFolders.length === 0 && favoriteEbooks.length === 0 ? (
+                <div className="p-4 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-1 bg-slate-50/50 dark:bg-slate-900/10">
+                  <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400">Nenhum favorito ainda</p>
+                  <p className="text-[9px] text-slate-400 dark:text-slate-500">Adicione estrelas aos e-books ou pastas!</p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2.5">
+                  {/* Favorite Folders */}
+                  {favoriteFolders.map(folderId => {
+                    const catData = [
+                      { id: 'hipertensao', label: 'Pressão Alta', icon: Heart, desc: 'Sartanas, Pris e controle de pressão.', color: 'text-emerald-600 bg-emerald-50/60 border-emerald-100 hover:border-emerald-200 hover:bg-emerald-50/80 dark:bg-emerald-950/20 dark:border-emerald-900/30 dark:text-emerald-400' },
+                      { id: 'diabetes', label: 'Diabetes', icon: Activity, desc: 'Metformina, Gliflozinas e açúcar no sangue.', color: 'text-blue-600 bg-blue-50/60 border-blue-100 hover:border-blue-200 hover:bg-blue-50/80 dark:bg-blue-950/20 dark:border-blue-900/30 dark:text-blue-400' },
+                      { id: 'colesterol', label: 'Colesterol Alto', icon: ShieldAlert, desc: 'Estatinas, Fibratos e gordura no sangue.', color: 'text-amber-600 bg-amber-50/60 border-amber-100 hover:border-amber-200 hover:bg-amber-50/80 dark:bg-amber-950/20 dark:border-amber-900/30 dark:text-amber-400' }
+                    ].find(c => c.id === folderId);
+                    
+                    if (!catData) return null;
+                    const CatIcon = catData.icon;
+                    return (
+                      <div key={folderId} className="relative group">
+                        <button
+                          onClick={() => {
+                            setSelectedCategory(folderId);
+                            setShowHome(false);
+                            setIsCustomMode(false);
+                            setSidebarOpen(true);
+                            setOpenFolders(prev => ({ ...prev, [folderId]: true }));
+                            setSelectedPreset('');
+                            setCurrentEbook(null);
+                          }}
+                          className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all cursor-pointer shadow-xs hover:shadow-md w-full ${catData.color}`}
+                        >
+                          <div className="p-1 rounded-lg bg-white dark:bg-slate-900 shadow-xs shrink-0 border border-slate-100 dark:border-slate-800">
+                            <CatIcon className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <h4 className="text-xs font-extrabold text-slate-800 dark:text-slate-200 truncate">📁 {catData.label}</h4>
+                          </div>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            toggleFavoriteFolder(folderId);
+                          }}
+                          className="absolute top-2.5 right-2.5 p-1 rounded-lg bg-white/90 dark:bg-slate-900/90 hover:bg-white text-amber-500 shadow-xs border border-slate-100 dark:border-slate-800 transition-colors cursor-pointer"
+                          title="Remover dos favoritos"
+                        >
+                          <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                  {/* Favorite Ebooks */}
+                  {favoriteEbooks.map(ebookKey => {
+                    const preset = presets.find(p => p.key === ebookKey);
+                    if (!preset) return null;
+                    
+                    return (
+                      <div 
+                        key={ebookKey} 
+                        className={`relative rounded-xl border p-3 flex items-center justify-between gap-3 shadow-xs hover:shadow-md transition-all w-full ${
+                          styleConfig.comfortDark 
+                            ? 'border-slate-800 bg-slate-900/30 hover:border-slate-700' 
+                            : 'border-slate-200 bg-white hover:bg-slate-50/50 hover:border-slate-250'
+                        }`}
+                      >
+                        <button
+                          onClick={() => {
+                            handlePresetSelect(ebookKey);
+                          }}
+                          className="flex-1 text-left min-w-0 cursor-pointer pr-6"
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Pill className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                            <p className={`text-xs font-bold truncate ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-850'}`}>
+                              {getPresetDisplayName(preset.key, accessibilitySettings.simpleLanguage, preset.medicineName)}
+                            </p>
+                          </div>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            toggleFavoriteEbook(ebookKey);
+                          }}
+                          className="absolute top-2.5 right-2.5 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-amber-500 transition-colors shrink-0 cursor-pointer"
+                          title="Remover dos favoritos"
+                        >
+                          <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
-            
-            {favoriteFolders.length === 0 && favoriteEbooks.length === 0 ? (
-              <div className="p-4 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-1 bg-slate-50/50 dark:bg-slate-900/10">
-                <p className="text-xs font-bold text-slate-500 dark:text-slate-400">Nenhum guia ou pasta favorita ainda</p>
-                <p className="text-[10px] text-slate-450 dark:text-slate-550">Clique no ícone de coração nos e-books e pastas para salvá-los aqui e acessá-los rapidamente!</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {/* Favorite Folders */}
-                {favoriteFolders.length > 0 && (
-                  <div className="space-y-2">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Pastas Salvas</span>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {favoriteFolders.map(folderId => {
-                        const catData = [
-                          { id: 'hipertensao', label: 'Pressão Alta', icon: Heart, desc: 'Sartanas, Pris e controle de pressão.', color: 'text-emerald-600 bg-emerald-50/60 border-emerald-100 hover:border-emerald-200 hover:bg-emerald-50/80' },
-                          { id: 'diabetes', label: 'Diabetes', icon: Activity, desc: 'Metformina, Gliflozinas e açúcar no sangue.', color: 'text-blue-600 bg-blue-50/60 border-blue-100 hover:border-blue-200 hover:bg-blue-50/80' },
-                          { id: 'colesterol', label: 'Colesterol Alto', icon: ShieldAlert, desc: 'Estatinas, Fibratos e gordura no sangue.', color: 'text-amber-600 bg-amber-50/60 border-amber-100 hover:border-amber-200 hover:bg-amber-50/80' }
-                        ].find(c => c.id === folderId);
-                        
-                        if (!catData) return null;
-                        const CatIcon = catData.icon;
-                        const count = presets.filter(p => p.category === folderId).length;
-                        return (
-                          <div key={folderId} className="relative group">
-                            <button
-                              onClick={() => {
-                                setSelectedCategory(folderId);
-                                setShowHome(false);
-                                setIsCustomMode(false);
-                                setSidebarOpen(true);
-                                setOpenFolders(prev => ({ ...prev, [folderId]: true }));
-                              }}
-                              className={`p-3.5 rounded-2xl border text-left flex flex-col justify-between gap-2.5 transition-all cursor-pointer shadow-xs hover:shadow-md hover:scale-[1.01] w-full ${catData.color}`}
-                            >
-                              <div className="flex justify-between items-start w-full">
-                                <div className="p-1.5 rounded-lg bg-white shadow-xs shrink-0 border border-slate-100">
-                                  <CatIcon className="w-3.5 h-3.5" />
-                                </div>
-                                <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full bg-white border border-slate-100 text-slate-500 mr-6">
-                                  {count} {count === 1 ? 'Guia' : 'Guias'}
-                                </span>
-                              </div>
-                              <div>
-                                <h3 className="text-xs font-extrabold text-slate-800">📁 {catData.label}</h3>
-                              </div>
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                e.preventDefault();
-                                toggleFavoriteFolder(folderId);
-                              }}
-                              className="absolute top-3 right-3 p-1.5 rounded-xl bg-white hover:bg-slate-50 text-rose-500 shadow-sm border border-slate-100 transition-colors cursor-pointer"
-                              title="Remover dos favoritos"
-                            >
-                              <Heart className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
 
-                {/* Favorite Ebooks */}
-                {favoriteEbooks.length > 0 && (
-                  <div className="space-y-2">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Guias de Medicamentos Salvos</span>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {favoriteEbooks.map(ebookKey => {
-                        const preset = presets.find(p => p.key === ebookKey);
-                        if (!preset) return null;
-                        
-                        return (
-                          <div 
-                            key={ebookKey} 
-                            className={`relative rounded-xl border p-3 flex items-center justify-between gap-3 shadow-xs hover:shadow-md transition-all ${
-                              styleConfig.comfortDark 
-                                ? 'border-slate-800 bg-slate-900/30 hover:border-slate-700' 
-                                : 'border-slate-200 bg-white hover:bg-slate-50/50 hover:border-slate-250'
-                            }`}
-                          >
-                            <button
-                              onClick={() => {
-                                handlePresetSelect(ebookKey);
-                              }}
-                              className="flex-1 text-left min-w-0 cursor-pointer"
-                            >
-                              <div className="flex items-center gap-1.5 min-w-0">
-                                <Pill className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                                <p className={`text-xs font-bold truncate ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-850'}`}>
-                                  {getPresetDisplayName(preset.key, accessibilitySettings.simpleLanguage, preset.medicineName)}
-                                </p>
-                              </div>
-                              <p className="text-[10px] text-slate-400 truncate mt-0.5 ml-5">
-                                {getPresetDisplaySubtitle(preset.key, accessibilitySettings.simpleLanguage, preset.subtitle)}
-                              </p>
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                e.preventDefault();
-                                toggleFavoriteEbook(ebookKey);
-                              }}
-                              className={`p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-rose-500 transition-colors shrink-0 cursor-pointer`}
-                              title="Remover dos favoritos"
-                            >
-                              <Heart className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
+            {/* Column 2: Mais Visualizados */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Eye className="w-4 h-4 text-emerald-500 fill-emerald-500/10" />
+                <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest block">Mais Visualizados</h3>
               </div>
-            )}
-          </div>
-
-          {/* Disease Category Folders */}
-          <div className="w-full max-w-2xl space-y-4 pt-4 border-t border-slate-100 dark:border-slate-900 text-left">
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">Explorar por Mais Visualizados</span>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {[
-                { id: 'hipertensao', label: 'Pressão Alta', icon: Heart, desc: 'Sartanas, Pris e controle de pressão.', color: 'text-emerald-600 bg-emerald-50/60 border-emerald-100 hover:border-emerald-200 hover:bg-emerald-50/80' },
-                { id: 'diabetes', label: 'Diabetes', icon: Activity, desc: 'Metformina, Gliflozinas e açúcar no sangue.', color: 'text-blue-600 bg-blue-50/60 border-blue-100 hover:border-blue-200 hover:bg-blue-50/80' },
-                { id: 'colesterol', label: 'Colesterol Alto', icon: ShieldAlert, desc: 'Estatinas, Fibratos e gordura no sangue.', color: 'text-amber-600 bg-amber-50/60 border-amber-100 hover:border-amber-200 hover:bg-amber-50/80' }
-              ].map((cat) => {
-                const CatIcon = cat.icon;
-                const count = presets.filter(p => p.category === cat.id).length;
-                return (
-                  <div key={cat.id} className="relative group">
-                    <button
-                      key={cat.id}
-                      onClick={() => {
-                        setSelectedCategory(cat.id);
-                        setShowHome(false);
-                        setIsCustomMode(false);
-                        setSidebarOpen(true);
-                        // Set corresponding accordion folder open in sidebar
-                        setOpenFolders(prev => ({ ...prev, [cat.id]: true }));
-                      }}
-                      className={`p-4 rounded-2xl border text-left flex flex-col justify-between gap-3 transition-all cursor-pointer shadow-xs hover:shadow-md hover:scale-[1.02] w-full ${cat.color}`}
-                    >
-                      <div className="flex justify-between items-start w-full">
-                        <div className="p-2 rounded-xl bg-white shadow-xs shrink-0 border border-slate-100">
-                          <CatIcon className="w-4 h-4 animate-pulse" />
+              
+              <div className="flex flex-col gap-2.5 w-full">
+                {[
+                  { id: 'hipertensao', label: 'Pressão Alta', icon: Heart, desc: 'Sartanas, Pris e controle de pressão.', color: 'text-emerald-600 bg-emerald-50/60 border-emerald-100 hover:border-emerald-200 hover:bg-emerald-50/80 dark:bg-emerald-950/20 dark:border-emerald-900/30 dark:text-emerald-400' },
+                  { id: 'diabetes', label: 'Diabetes', icon: Activity, desc: 'Metformina, Gliflozinas e açúcar no sangue.', color: 'text-blue-600 bg-blue-50/60 border-blue-100 hover:border-blue-200 hover:bg-blue-50/80 dark:bg-blue-950/20 dark:border-blue-900/30 dark:text-blue-400' },
+                  { id: 'colesterol', label: 'Colesterol Alto', icon: ShieldAlert, desc: 'Estatinas, Fibratos e gordura no sangue.', color: 'text-amber-600 bg-amber-50/60 border-amber-100 hover:border-amber-200 hover:bg-amber-50/80 dark:bg-amber-950/20 dark:border-amber-900/30 dark:text-amber-400' }
+                ].map((cat) => {
+                  const CatIcon = cat.icon;
+                  const count = presets.filter(p => p.category === cat.id).length;
+                  return (
+                    <div key={cat.id} className="relative group w-full">
+                      <button
+                        onClick={() => {
+                          setSelectedCategory(cat.id);
+                          setShowHome(false);
+                          setIsCustomMode(false);
+                          setSidebarOpen(true);
+                          setOpenFolders(prev => ({ ...prev, [cat.id]: true }));
+                          setSelectedPreset('');
+                          setCurrentEbook(null);
+                        }}
+                        className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all cursor-pointer shadow-xs hover:shadow-md w-full ${cat.color}`}
+                      >
+                        <div className="p-1 rounded-lg bg-white dark:bg-slate-900 shadow-xs shrink-0 border border-slate-100 dark:border-slate-800">
+                          <CatIcon className="w-3.5 h-3.5 animate-pulse" />
                         </div>
-                        <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-white border border-slate-100 text-slate-500 mr-6">
+                        <div className="flex-1 min-w-0">
+                          <h4 className="text-xs font-extrabold text-slate-800 dark:text-slate-200 truncate">📁 {cat.label}</h4>
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate mt-0.5">{cat.desc}</p>
+                        </div>
+                        <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 text-slate-500 shrink-0">
                           {count} {count === 1 ? 'Guia' : 'Guias'}
                         </span>
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          toggleFavoriteFolder(cat.id);
+                        }}
+                        className={`absolute top-2.5 right-2.5 p-1 rounded-lg bg-white/90 dark:bg-slate-900/90 hover:bg-white shadow-xs border border-slate-100 dark:border-slate-800 transition-colors cursor-pointer ${
+                          favoriteFolders.includes(cat.id)
+                            ? 'flex text-amber-500'
+                            : 'hidden group-hover:flex text-slate-400 hover:text-amber-500'
+                        }`}
+                        title={favoriteFolders.includes(cat.id) ? "Remover pasta dos favoritos" : "Adicionar pasta aos favoritos"}
+                      >
+                        <Star className={`w-3 h-3 ${favoriteFolders.includes(cat.id) ? 'fill-amber-500 text-amber-500' : 'text-slate-400'}`} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Column 3: Histórico */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-indigo-500" />
+                <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest block">Histórico</h3>
+              </div>
+              
+              {recentViews.length === 0 ? (
+                <div className="p-4 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-1 bg-slate-50/50 dark:bg-slate-900/10">
+                  <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400">Nenhum histórico</p>
+                  <p className="text-[9px] text-slate-400 dark:text-slate-500">Os guias que você ler aparecerão aqui!</p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2.5 w-full">
+                  {recentViews.map(ebookKey => {
+                    const preset = presets.find(p => p.key === ebookKey);
+                    if (!preset) return null;
+                    return (
+                      <div 
+                        key={ebookKey} 
+                        className={`relative rounded-xl border p-3 flex items-center justify-between gap-3 shadow-xs hover:shadow-md transition-all w-full ${
+                          styleConfig.comfortDark 
+                            ? 'border-slate-800 bg-slate-900/30 hover:border-slate-700' 
+                            : 'border-slate-200 bg-white hover:bg-slate-50/50 hover:border-slate-250'
+                        }`}
+                      >
+                        <button
+                          onClick={() => {
+                            handlePresetSelect(ebookKey);
+                          }}
+                          className="flex-1 text-left min-w-0 cursor-pointer pr-6"
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Clock className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                            <p className={`text-xs font-bold truncate ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-850'}`}>
+                              {getPresetDisplayName(preset.key, accessibilitySettings.simpleLanguage, preset.medicineName)}
+                            </p>
+                          </div>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            toggleFavoriteEbook(ebookKey);
+                          }}
+                          className="absolute top-2.5 right-2.5 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0 cursor-pointer text-slate-350 hover:text-amber-500"
+                          title={favoriteEbooks.includes(ebookKey) ? "Remover dos favoritos" : "Adicionar aos favoritos"}
+                        >
+                          <Star className={`w-3 h-3 ${favoriteEbooks.includes(ebookKey) ? 'fill-amber-500 text-amber-500' : 'text-slate-400'}`} />
+                        </button>
                       </div>
-                      <div>
-                        <h3 className="text-xs font-extrabold text-slate-800">📁 {cat.label}</h3>
-                        <p className="text-[10px] text-slate-500 mt-1 leading-snug">{cat.desc}</p>
-                      </div>
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        toggleFavoriteFolder(cat.id);
-                      }}
-                      className="absolute top-4 right-4 p-1.5 rounded-xl bg-white hover:bg-slate-50 text-slate-450 hover:text-rose-500 shadow-sm border border-slate-100 transition-colors cursor-pointer"
-                      title={favoriteFolders.includes(cat.id) ? "Remover pasta dos favoritos" : "Adicionar pasta aos favoritos"}
-                    >
-                      <Heart className={`w-4 h-4 ${favoriteFolders.includes(cat.id) ? 'fill-rose-500 text-rose-500' : 'text-slate-400'}`} />
-                    </button>
-                  </div>
-                );
-              })}
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
 
@@ -1776,8 +2914,32 @@ export default function App() {
             </button>
           </div>
         </div>
+        </div>
       ) : (
         <>
+          {/* Floating Profile Button when Sidebar is Minimized */}
+          {!sidebarOpen && (
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="fixed top-4 left-4 z-50 p-0.5 rounded-full transition-all cursor-pointer shadow-md border border-slate-200/80 dark:border-slate-850 bg-white dark:bg-slate-900 hover:scale-[1.05] active:scale-[0.95]"
+              title="Abrir menu"
+            >
+              {user ? (
+                user.photoURL ? (
+                  <img src={user.photoURL} alt="Foto de perfil" className="w-10 h-10 rounded-full border border-slate-100 dark:border-slate-800 object-cover" referrerPolicy="no-referrer" />
+                ) : (
+                  <div className="w-10 h-10 rounded-full bg-indigo-100 dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 flex items-center justify-center font-extrabold text-sm border border-indigo-200/50 dark:border-slate-750">
+                    {userName ? userName.charAt(0).toUpperCase() : (user.email ? user.email.charAt(0).toUpperCase() : 'U')}
+                  </div>
+                )
+              ) : (
+                <div className="w-10 h-10 rounded-full bg-indigo-50 dark:bg-slate-850 text-indigo-600 dark:text-indigo-400 flex items-center justify-center font-extrabold text-sm border border-indigo-100 dark:border-slate-800">
+                  <UserIcon className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                </div>
+              )}
+            </button>
+          )}
+
           {/* Mobile Sidebar Backdrop */}
           {sidebarOpen && (
             <div 
@@ -1790,62 +2952,87 @@ export default function App() {
           {/* Sidebar Controls */}
           <aside 
             id="clarifarma-sidebar" 
-        className={`flex-shrink-0 ${styleConfig.sidebarBg} flex flex-col justify-between transition-all duration-300 fixed inset-y-0 left-0 z-50 md:static md:translate-x-0 ${
-          sidebarOpen 
-            ? 'w-[290px] xs:w-[320px] md:w-80 lg:w-96 p-6 md:p-8 border-r border-slate-200/80 dark:border-slate-800 shadow-2xl md:shadow-md translate-x-0' 
-            : 'w-0 p-0 overflow-hidden border-r-0 -translate-x-full md:w-0'
-        }`}
-      >
-        <div className={`flex-1 flex flex-col justify-between h-full py-1 transition-all ${sidebarOpen ? 'min-w-[240px] xs:min-w-[272px] md:min-w-[310px]' : 'min-w-0 w-0 overflow-hidden'}`}>
-          <div className="space-y-6">
-            
-            {/* Brand Header */}
-            <div className="flex items-start justify-between gap-2">
-              <button
-                onClick={() => {
-                  setShowHome(true);
-                  setSelectedCategory(null);
-                  stopSpeaking();
-                }}
-                className="flex items-center gap-3 text-left hover:opacity-85 transition-opacity cursor-pointer"
-                title="Voltar ao início"
-              >
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-white font-extrabold shadow-sm ${
-                  styleConfig.themeKey === 'emerald' 
-                    ? 'bg-emerald-600' 
-                    : styleConfig.themeKey === 'amber' 
-                      ? 'bg-amber-600' 
-                      : styleConfig.themeKey === 'blue' 
-                        ? 'bg-blue-600' 
-                        : 'bg-indigo-600'
-                }`}>
-                  M
-                </div>
-                <div>
-                  <h1 className={`text-xl font-extrabold tracking-tight ${styleConfig.sidebarTitle} leading-none flex items-baseline gap-1`}>
-                    <span className={`text-[9px] ${styleConfig.labelColor} font-semibold uppercase tracking-widest`}>do</span>
-                    <span>MediQuês</span>
-                  </h1>
-                  <span className={`text-[10px] ${styleConfig.labelColor} font-semibold uppercase tracking-widest block mt-1`}>para o português</span>
-                </div>
-              </button>
+            className={`flex-shrink-0 ${styleConfig.sidebarBg} flex flex-col justify-between transition-all duration-300 fixed inset-y-0 left-0 z-50 md:sticky md:top-0 md:h-screen md:translate-x-0 ${
+              sidebarOpen 
+                ? 'w-[290px] xs:w-[320px] md:w-80 lg:w-96 p-6 md:p-8 border-r border-slate-200/80 dark:border-slate-800 shadow-2xl md:shadow-md translate-x-0' 
+                : 'w-0 p-0 overflow-hidden border-r-0 -translate-x-full md:w-0'
+            }`}
+          >
+            <div className={`flex-1 flex flex-col h-full min-h-0 overflow-hidden py-1 transition-all ${sidebarOpen ? 'min-w-[240px] xs:min-w-[272px] md:min-w-[310px]' : 'min-w-0 w-0 overflow-hidden'}`}>
+              
+              {/* User Profile / Login Area (Static, stays at top) */}
+              <div className="flex-shrink-0 pb-4 border-b border-slate-100/50 dark:border-slate-800/50">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    {user ? (
+                      <button
+                        onClick={() => {
+                          setShowProfile(true);
+                          setShowHome(false);
+                          setShowMyMedicines(false);
+                          setSelectedCategory(null);
+                          setViewingTagResults(false);
+                          setCurrentEbook(null);
+                          if (window.innerWidth < 768) {
+                            setSidebarOpen(false);
+                          }
+                        }}
+                        className={`w-full p-2.5 rounded-xl border flex items-center gap-2.5 transition-all cursor-pointer text-left ${
+                          showProfile
+                            ? `${styleConfig.comfortDark ? 'border-indigo-500 bg-indigo-950/40 text-indigo-100 font-extrabold shadow-sm' : 'border-indigo-600 bg-indigo-50/50 text-indigo-900 font-extrabold shadow-xs'}`
+                            : `${styleConfig.comfortDark ? 'border-slate-800 hover:border-slate-700 text-slate-300 hover:bg-slate-900/50' : 'border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50/50'}`
+                        }`}
+                      >
+                        {user.photoURL ? (
+                          <img src={user.photoURL} alt="Foto de perfil" className="w-8 h-8 rounded-full border border-slate-200 dark:border-slate-850 shrink-0" referrerPolicy="no-referrer" />
+                        ) : (
+                          <div className="w-8 h-8 rounded-full bg-indigo-100 dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 flex items-center justify-center font-extrabold text-xs border border-indigo-200/50 dark:border-slate-750 shrink-0">
+                            {userName ? userName.charAt(0).toUpperCase() : (user.email ? user.email.charAt(0).toUpperCase() : 'U')}
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <span className="text-[9px] text-slate-400 font-semibold block uppercase tracking-wider leading-none">Bem-vindo(a)</span>
+                          <span className={`text-xs block font-bold truncate mt-0.5 ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-800'}`}>
+                            {userName || user.displayName || 'Usuário'}
+                          </span>
+                        </div>
+                        <ChevronRight className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setAuthModalTab('login');
+                          setAuthModalOpen(true);
+                        }}
+                        className={`w-full py-2.5 px-3 border rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs ${
+                          styleConfig.comfortDark 
+                            ? 'bg-slate-800 hover:bg-slate-755 text-indigo-400 hover:text-indigo-300 border-slate-700'
+                            : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-600 hover:text-indigo-700 border-indigo-100'
+                        }`}
+                      >
+                        <LogIn className="w-4 h-4 shrink-0" />
+                        <span className="truncate">Entrar / Cadastrar-se</span>
+                      </button>
+                    )}
+                  </div>
 
-              <button
-                id="close-sidebar-btn"
-                onClick={() => setSidebarOpen(false)}
-                className={`p-2 rounded-xl border transition-all cursor-pointer ${
-                  styleConfig.comfortDark 
-                    ? 'border-slate-800 text-slate-400 hover:bg-slate-900 hover:text-slate-200' 
-                    : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-800'
-                }`}
-                title="Recolher menu"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-            </div>
-            <p className={`text-xs ${styleConfig.sidebarText} mt-2`}>
-              Transformamos bulas complexas em livrinhos coloridos e fáceis para quem precisa de ajuda para entender seus remédios.
-            </p>
+                  <button
+                    id="close-sidebar-btn"
+                    onClick={() => setSidebarOpen(false)}
+                    className={`p-2 rounded-xl border transition-all cursor-pointer ${
+                      styleConfig.comfortDark 
+                        ? 'border-slate-800 text-slate-400 hover:bg-slate-900 hover:text-slate-200' 
+                        : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                    }`}
+                    title="Recolher menu"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Scrollable Container (Everything else in the sidebar) */}
+              <div className="flex-1 overflow-y-auto pr-1 space-y-6 mt-4 scrollbar-thin">
 
 
 
@@ -1918,280 +3105,1316 @@ export default function App() {
 
           <hr className={styleConfig.comfortDark ? 'border-slate-800' : 'border-slate-100'} />
 
-          {/* Quick Preset Selector */}
-          <div>
-            <label className={`text-xs font-bold ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'} uppercase tracking-wider mb-3 block flex items-center gap-1.5`}>
-              <FolderOpen className={`w-3.5 h-3.5 ${styleConfig.comfortDark ? 'text-slate-400' : 'text-blue-500'}`} />
-              Pastas de Doenças ({filteredPresets.length > 0 ? Array.from(new Set(filteredPresets.map(p => p.category))).length : 0})
-            </label>
-            
-            {filteredPresets.length > 0 ? (
-              <div className="space-y-2.5">
-                {[
-                  { id: 'hipertensao', icon: Heart, color: 'text-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/20 dark:border-emerald-500/10' },
-                  { id: 'diabetes', icon: Activity, color: 'text-blue-500 bg-blue-50 dark:bg-blue-950/40 border-blue-500/20 dark:border-blue-500/10' },
-                  { id: 'colesterol', icon: ShieldAlert, color: 'text-amber-500 bg-amber-50 dark:bg-amber-950/40 border-amber-500/20 dark:border-amber-500/10' }
-                ].map((cat) => {
-                  const categoryPresets = filteredPresets.filter(p => p.category === cat.id);
-                  if (categoryPresets.length === 0) return null;
-                  
-                  const isExpanded = !!(
-                    openFolders[cat.id] || 
-                    searchQuery.trim() !== '' || 
-                    (!showHome && searchQuery.trim() === '' && openFolders[cat.id] !== false)
-                  );
-                  const CategoryIcon = cat.icon;
-                  const folderName = getPresetDisplayName(cat.id, accessibilitySettings.simpleLanguage, cat.id);
-                  const folderDesc = getPresetDisplaySubtitle(cat.id, accessibilitySettings.simpleLanguage, cat.id);
-
-                  return (
-                    <div 
-                      key={cat.id} 
-                      className={`rounded-xl border transition-all overflow-hidden ${
-                        isExpanded 
-                          ? `${styleConfig.comfortDark ? 'border-slate-800 bg-slate-900/10' : 'border-slate-200 bg-slate-50/20'}` 
-                          : `${styleConfig.comfortDark ? 'border-slate-800 bg-slate-900/50 hover:border-slate-700' : 'border-slate-100 bg-slate-50/50 hover:border-slate-200'}`
-                      }`}
-                    >
-                      {/* Folder Header button */}
-                      <div className={`w-full p-3 flex items-center justify-between text-left transition-all`}>
-                        <button
-                          onClick={() => {
-                            setOpenFolders(prev => ({ ...prev, [cat.id]: !prev[cat.id] }));
-                            setSelectedCategory(cat.id);
-                            setIsCustomMode(false);
-                            setShowHome(false);
-                          }}
-                          className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer mr-2"
-                        >
-                          <div className={`p-2 rounded-lg border ${cat.color} flex items-center justify-center flex-shrink-0`}>
-                            <CategoryIcon className="w-4 h-4 animate-pulse" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-800'}`}>
-                              📁 {folderName}
-                            </span>
-                            <span className={`text-[10px] block truncate ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                              {folderDesc}
-                            </span>
-                          </div>
-                        </button>
-
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              e.preventDefault();
-                              toggleFavoriteFolder(cat.id);
-                            }}
-                            className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-450 hover:text-rose-500 transition-colors cursor-pointer"
-                            title={favoriteFolders.includes(cat.id) ? "Remover pasta dos favoritos" : "Adicionar pasta aos favoritos"}
-                          >
-                            <Heart className={`w-3.5 h-3.5 ${favoriteFolders.includes(cat.id) ? 'fill-rose-500 text-rose-500' : 'text-slate-400 dark:text-slate-500'}`} />
-                          </button>
-
-                          <button
-                            onClick={() => {
-                              setOpenFolders(prev => ({ ...prev, [cat.id]: !prev[cat.id] }));
-                              setSelectedCategory(cat.id);
-                              setIsCustomMode(false);
-                              setShowHome(false);
-                            }}
-                            className="flex items-center gap-1.5 cursor-pointer"
-                          >
-                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${styleConfig.comfortDark ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>
-                              {categoryPresets.length} {categoryPresets.length === 1 ? 'guia' : 'guias'}
-                            </span>
-                            {isExpanded ? (
-                              <ChevronDown className="w-4 h-4 text-slate-400" />
-                            ) : (
-                              <ChevronRight className="w-4 h-4 text-slate-400" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Expandable/collapsible content */}
-                      {isExpanded && (
-                        <div className={`p-2 border-t flex flex-col gap-1.5 ${styleConfig.comfortDark ? 'border-slate-800 bg-slate-950/20' : 'border-slate-200/50 bg-white'}`}>
-                          {categoryPresets.map((preset) => {
-                            const isSelected = selectedPreset === preset.key && !isCustomMode;
-                            return (
-                              <div key={preset.key} className="relative group/ebook-side">
-                                <button
-                                  id={`preset-btn-${preset.key}`}
-                                  onClick={() => handlePresetSelect(preset.key)}
-                                  className={`w-full p-2.5 pr-11 rounded-lg border text-left transition-all cursor-pointer flex items-center justify-between gap-3 ${
-                                    isSelected
-                                      ? `${styleConfig.comfortDark ? 'border-indigo-500 bg-indigo-950/40 text-indigo-100' : 'border-indigo-600 bg-indigo-50/50 text-indigo-900'} font-semibold ring-1 ring-indigo-500/20` 
-                                      : `${styleConfig.comfortDark ? 'border-slate-800 hover:border-slate-700 text-slate-300 bg-slate-900/50' : 'border-slate-200 hover:border-slate-300 text-slate-600 hover:bg-slate-50/50'}`
-                                  }`}
-                                >
-                                  <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-1.5">
-                                      <Pill className={`w-3.5 h-3.5 flex-shrink-0 ${isSelected ? 'text-indigo-500' : 'text-slate-400'}`} />
-                                      <p className="text-xs font-bold truncate">
-                                        {getPresetDisplayName(preset.key, accessibilitySettings.simpleLanguage, preset.medicineName)}
-                                      </p>
-                                    </div>
-                                    <p className={`text-[10px] font-normal truncate mt-0.5 ml-5 ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                                      {getPresetDisplaySubtitle(preset.key, accessibilitySettings.simpleLanguage, preset.subtitle)}
-                                    </p>
-                                  </div>
-
-                                  <div className="flex-shrink-0 flex items-center gap-1 mr-4">
-                                    {preset.tags && preset.tags.length > 0 && (
-                                      <span className="text-[8px] font-bold px-1 bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 rounded border border-slate-200/40 dark:border-slate-700/45 uppercase tracking-wide">
-                                        {preset.tags[0]}
-                                      </span>
-                                    )}
-                                    <ChevronRight className="w-3 h-3 text-slate-400" />
-                                  </div>
-                                </button>
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    e.preventDefault();
-                                    toggleFavoriteEbook(preset.key);
-                                  }}
-                                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-rose-500 transition-colors cursor-pointer"
-                                  title={favoriteEbooks.includes(preset.key) ? "Remover guia dos favoritos" : "Adicionar guia aos favoritos"}
-                                >
-                                  <Heart className={`w-3.5 h-3.5 ${favoriteEbooks.includes(preset.key) ? 'fill-rose-500 text-rose-500' : 'text-slate-400 dark:text-slate-500'}`} />
-                                </button>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="p-4 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-1 bg-slate-50/50 dark:bg-slate-900/10">
-                <p className="text-xs font-bold text-slate-500 dark:text-slate-400">Nenhum resultado</p>
-                <p className="text-[10px] text-slate-400 dark:text-slate-500">Tente buscar por "pressão", "glicose" ou "azia".</p>
-              </div>
-            )}
-
+          {/* My Medicines Option */}
+          <div className="mb-4">
             <button
-              id="new-medicine-btn"
               onClick={() => {
-                setIsCustomMode(true);
-                setSelectedPreset('');
+                setShowMyMedicines(true);
+                setShowHome(false);
+                setIsCustomMode(false);
+                setSelectedCategory(null);
+                setViewingTagResults(false);
+                setCurrentEbook(null);
+                if (window.innerWidth < 768) {
+                  setSidebarOpen(false);
+                }
               }}
-              className={`w-full mt-3 py-3 px-4 border border-dashed rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                isCustomMode 
-                  ? `${styleConfig.comfortDark ? 'border-indigo-500 bg-indigo-950/20 text-indigo-400' : 'border-indigo-600 bg-indigo-50/20 text-indigo-600'}`
-                  : `${styleConfig.comfortDark ? 'border-slate-800 hover:border-slate-700 text-slate-400' : 'border-slate-300 hover:border-slate-400 text-slate-600'}`
+              className={`w-full p-3 rounded-xl border flex items-center justify-between text-left transition-all cursor-pointer ${
+                showMyMedicines
+                  ? `${styleConfig.comfortDark ? 'border-indigo-500 bg-indigo-950/40 text-indigo-100 font-extrabold shadow-sm' : 'border-indigo-600 bg-indigo-50/50 text-indigo-900 font-extrabold shadow-xs'}`
+                  : `${styleConfig.comfortDark ? 'border-slate-800 hover:border-slate-700 text-slate-300 hover:bg-slate-900/50' : 'border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50/50'}`
               }`}
             >
-              <PlusCircle className="w-4 h-4" />
-              Simplificar Outro Remédio
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className={`p-2 rounded-lg border ${
+                  showMyMedicines
+                    ? 'text-indigo-500 bg-indigo-100/40 border-indigo-500/20'
+                    : 'text-slate-400 bg-slate-50 dark:bg-slate-900 border-slate-200/50 dark:border-slate-800/50'
+                } flex items-center justify-center flex-shrink-0`}>
+                  <Pill className={`w-4 h-4 ${showMyMedicines ? 'animate-bounce' : ''}`} />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs block font-bold">
+                    Meus Remédios 💊
+                  </span>
+                  <span className={`text-[10px] font-medium block truncate ${showMyMedicines ? 'text-indigo-600/80 dark:text-indigo-300/80' : 'text-slate-400'}`}>
+                    Minha receita & lembretes
+                  </span>
+                </div>
+              </div>
+              <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded-full ${
+                showMyMedicines ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-850 text-slate-500 dark:text-slate-400'
+              }`}>
+                {myMedicines.length}
+              </span>
             </button>
+          </div>
+
+          {/* Quick Preset Selector */}
+          <div>
+            <button
+              onClick={() => setSidebarFoldersCollapsed(!sidebarFoldersCollapsed)}
+              className={`w-full text-xs font-bold ${styleConfig.comfortDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700'} uppercase tracking-wider mb-3 flex items-center justify-between text-left cursor-pointer`}
+            >
+              <div className="flex items-center gap-1.5">
+                <FolderOpen className={`w-3.5 h-3.5 ${styleConfig.comfortDark ? 'text-slate-400' : 'text-blue-500'}`} />
+                Pastas de Doenças ({filteredPresets.length > 0 ? Array.from(new Set(filteredPresets.map(p => p.category))).length : 0})
+              </div>
+              {sidebarFoldersCollapsed ? (
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+              )}
+            </button>
+            
+            {!sidebarFoldersCollapsed && (
+              <>
+                {filteredPresets.length > 0 ? (
+                  <div className="space-y-2.5">
+                    {[
+                      { id: 'hipertensao', icon: Heart, color: 'text-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/20 dark:border-emerald-500/10' },
+                      { id: 'diabetes', icon: Activity, color: 'text-blue-500 bg-blue-50 dark:bg-blue-950/40 border-blue-500/20 dark:border-blue-500/10' },
+                      { id: 'colesterol', icon: ShieldAlert, color: 'text-amber-500 bg-amber-50 dark:bg-amber-950/40 border-amber-500/20 dark:border-amber-500/10' }
+                    ].map((cat) => {
+                      const categoryPresets = filteredPresets.filter(p => p.category === cat.id);
+                      if (categoryPresets.length === 0) return null;
+                      
+                      const isExpanded = !!(
+                        openFolders[cat.id] || 
+                        searchQuery.trim() !== ''
+                      );
+                      const CategoryIcon = cat.icon;
+                      const folderName = getPresetDisplayName(cat.id, accessibilitySettings.simpleLanguage, cat.id);
+                      const folderDesc = getPresetDisplaySubtitle(cat.id, accessibilitySettings.simpleLanguage, cat.id);
+
+                      return (
+                        <div 
+                          key={cat.id} 
+                          className={`rounded-xl border transition-all overflow-hidden ${
+                            isExpanded 
+                              ? `${styleConfig.comfortDark ? 'border-slate-800 bg-slate-900/10' : 'border-slate-200 bg-slate-50/20'}` 
+                              : `${styleConfig.comfortDark ? 'border-slate-800 bg-slate-900/50 hover:border-slate-700' : 'border-slate-100 bg-slate-50/50 hover:border-slate-200'}`
+                          }`}
+                        >
+                          {/* Folder Header button */}
+                          <div className={`w-full p-3 flex items-center justify-between text-left transition-all`}>
+                            <button
+                              onClick={() => {
+                                setOpenFolders(prev => ({ ...prev, [cat.id]: true }));
+                                setSelectedCategory(cat.id);
+                                setIsCustomMode(false);
+                                setShowHome(false);
+                                setSelectedPreset('');
+                                setCurrentEbook(null);
+                              }}
+                              className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer mr-2"
+                            >
+                              <div className={`p-2 rounded-lg border ${cat.color} flex items-center justify-center flex-shrink-0`}>
+                                <CategoryIcon className="w-4 h-4 animate-pulse" />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-800'}`}>
+                                  📁 {folderName}
+                                </span>
+                                <span className={`text-[10px] block truncate ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                  {folderDesc}
+                                </span>
+                              </div>
+                            </button>
+
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  toggleFavoriteFolder(cat.id);
+                                }}
+                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-amber-500 transition-colors cursor-pointer"
+                                title={favoriteFolders.includes(cat.id) ? "Remover pasta dos favoritos" : "Adicionar pasta aos favoritos"}
+                              >
+                                <Star className={`w-3.5 h-3.5 ${favoriteFolders.includes(cat.id) ? 'fill-amber-500 text-amber-500' : 'text-slate-400 dark:text-slate-500'}`} />
+                              </button>
+
+                              <button
+                                onClick={() => {
+                                  setOpenFolders(prev => ({ ...prev, [cat.id]: !prev[cat.id] }));
+                                  setSelectedCategory(cat.id);
+                                  setIsCustomMode(false);
+                                  setShowHome(false);
+                                }}
+                                className="flex items-center gap-1.5 cursor-pointer"
+                              >
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${styleConfig.comfortDark ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>
+                                  {categoryPresets.length} {categoryPresets.length === 1 ? 'guia' : 'guias'}
+                                </span>
+                                {isExpanded ? (
+                                  <ChevronDown className="w-4 h-4 text-slate-400" />
+                                ) : (
+                                  <ChevronRight className="w-4 h-4 text-slate-400" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Expandable/collapsible content */}
+                          {isExpanded && (
+                            <div className={`p-2 border-t flex flex-col gap-1.5 ${styleConfig.comfortDark ? 'border-slate-800 bg-slate-950/20' : 'border-slate-200/50 bg-white'}`}>
+                              {categoryPresets.map((preset) => {
+                                const isSelected = selectedPreset === preset.key && !isCustomMode;
+                                return (
+                                  <div key={preset.key} className="relative group/ebook-side">
+                                    <button
+                                      id={`preset-btn-${preset.key}`}
+                                      onClick={() => handlePresetSelect(preset.key)}
+                                      className={`w-full p-2.5 pr-11 rounded-lg border text-left transition-all cursor-pointer flex items-center justify-between gap-3 ${
+                                        isSelected
+                                          ? `${styleConfig.comfortDark ? 'border-indigo-500 bg-indigo-950/40 text-indigo-100' : 'border-indigo-600 bg-indigo-50/50 text-indigo-900'} font-semibold ring-1 ring-indigo-500/20` 
+                                          : `${styleConfig.comfortDark ? 'border-slate-800 hover:border-slate-700 text-slate-300 bg-slate-900/50' : 'border-slate-200 hover:border-slate-300 text-slate-600 hover:bg-slate-50/50'}`
+                                      }`}
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-1.5">
+                                          <Pill className={`w-3.5 h-3.5 flex-shrink-0 ${isSelected ? 'text-indigo-500' : 'text-slate-400'}`} />
+                                          <p className="text-xs font-bold truncate">
+                                            {getPresetDisplayName(preset.key, accessibilitySettings.simpleLanguage, preset.medicineName)}
+                                          </p>
+                                        </div>
+                                        <p className={`text-[10px] font-normal truncate mt-0.5 ml-5 ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                          {getPresetDisplaySubtitle(preset.key, accessibilitySettings.simpleLanguage, preset.subtitle)}
+                                        </p>
+                                      </div>
+
+                                      <div className="flex-shrink-0 flex items-center gap-1 mr-4">
+                                        {preset.tags && preset.tags.length > 0 && (
+                                          <span className="text-[8px] font-bold px-1 bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 rounded border border-slate-200/40 dark:border-slate-700/45 uppercase tracking-wide">
+                                            {preset.tags[0]}
+                                          </span>
+                                        )}
+                                        <ChevronRight className="w-3 h-3 text-slate-400" />
+                                      </div>
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        e.preventDefault();
+                                        toggleFavoriteEbook(preset.key);
+                                      }}
+                                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-450 hover:text-amber-500 transition-colors cursor-pointer"
+                                      title={favoriteEbooks.includes(preset.key) ? "Remover guia dos favoritos" : "Adicionar guia aos favoritos"}
+                                    >
+                                      <Star className={`w-3.5 h-3.5 ${favoriteEbooks.includes(preset.key) ? 'fill-amber-500 text-amber-500' : 'text-slate-400 dark:text-slate-500'}`} />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="p-4 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-1 bg-slate-50/50 dark:bg-slate-900/10">
+                    <p className="text-xs font-bold text-slate-500 dark:text-slate-400">Nenhum resultado</p>
+                    <p className="text-[10px] text-slate-400 dark:text-slate-500">Tente buscar por "pressão", "glicose" ou "azia".</p>
+                  </div>
+                )}
+
+                <button
+                  id="new-medicine-btn"
+                  onClick={() => {
+                    setIsCustomMode(true);
+                    setSelectedPreset('');
+                  }}
+                  className={`w-full mt-3 py-3 px-4 border border-dashed rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                    isCustomMode 
+                      ? `${styleConfig.comfortDark ? 'border-indigo-500 bg-indigo-950/20 text-indigo-400' : 'border-indigo-600 bg-indigo-50/20 text-indigo-600'}`
+                      : `${styleConfig.comfortDark ? 'border-slate-800 hover:border-slate-700 text-slate-400' : 'border-slate-300 hover:border-slate-400 text-slate-600'}`
+                  }`}
+                >
+                  <PlusCircle className="w-4 h-4" />
+                  Simplificar Outro Remédio
+                </button>
+              </>
+            )}
+          </div>
+
+          <hr className={styleConfig.comfortDark ? 'border-slate-800' : 'border-slate-100'} />
+
+          {/* Favoritos Section */}
+          <div>
+            <button
+              onClick={() => setSidebarFavoritesCollapsed(!sidebarFavoritesCollapsed)}
+              className={`w-full text-xs font-bold ${styleConfig.comfortDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700'} uppercase tracking-wider mb-3 flex items-center justify-between text-left cursor-pointer`}
+            >
+              <div className="flex items-center gap-1.5">
+                <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+                Favoritos ({favoriteFolders.length + favoriteEbooks.length})
+              </div>
+              {sidebarFavoritesCollapsed ? (
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+              )}
+            </button>
+
+            {!sidebarFavoritesCollapsed && (
+              favoriteFolders.length === 0 && favoriteEbooks.length === 0 ? (
+                <div className="p-3 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-center bg-slate-50/30 dark:bg-slate-900/10">
+                  <p className="text-[10px] text-slate-400 dark:text-slate-500 font-semibold">Nenhum favorito</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {/* Favorite Folders */}
+                  {favoriteFolders.map(folderId => {
+                    const catData = [
+                      { id: 'hipertensao', label: 'Pressão Alta', icon: Heart, color: 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/10' },
+                      { id: 'diabetes', label: 'Diabetes', icon: Activity, color: 'text-blue-600 bg-blue-50 dark:bg-blue-950/40 border-blue-500/10' },
+                      { id: 'colesterol', label: 'Colesterol Alto', icon: ShieldAlert, color: 'text-amber-600 bg-amber-50 dark:bg-amber-950/40 border-amber-500/10' }
+                    ].find(c => c.id === folderId);
+                    if (!catData) return null;
+                    const CatIcon = catData.icon;
+                    return (
+                      <div key={`side-fav-folder-${folderId}`} className="relative group/side-fav-folder">
+                        <button
+                          onClick={() => {
+                            setSelectedCategory(folderId);
+                            setShowHome(false);
+                            setIsCustomMode(false);
+                            setOpenFolders(prev => ({ ...prev, [folderId]: true }));
+                            setSelectedPreset('');
+                            setCurrentEbook(null);
+                          }}
+                          className={`p-2.5 rounded-xl border text-left flex items-center gap-2 transition-all cursor-pointer w-full text-xs font-bold ${catData.color}`}
+                        >
+                          <CatIcon className="w-3.5 h-3.5" />
+                          <span className="truncate">📁 {catData.label}</span>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            toggleFavoriteFolder(folderId);
+                          }}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-amber-500 border border-slate-100 dark:border-slate-800 cursor-pointer"
+                          title="Remover"
+                        >
+                          <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                  {/* Favorite Ebooks */}
+                  {favoriteEbooks.map(ebookKey => {
+                    const preset = presets.find(p => p.key === ebookKey);
+                    if (!preset) return null;
+                    const isSelected = selectedPreset === ebookKey && !isCustomMode;
+                    return (
+                      <div key={`side-fav-ebook-${ebookKey}`} className="relative group/side-fav-ebook">
+                        <button
+                          onClick={() => handlePresetSelect(ebookKey)}
+                          className={`p-2.5 pr-9 rounded-xl border text-left flex items-center gap-2 transition-all cursor-pointer w-full text-xs font-bold ${
+                            isSelected
+                              ? `${styleConfig.comfortDark ? 'border-indigo-500 bg-indigo-950/40 text-indigo-100' : 'border-indigo-600 bg-indigo-50/50 text-indigo-900'}`
+                              : `${styleConfig.comfortDark ? 'border-slate-800 hover:border-slate-700 text-slate-300 bg-slate-900/50' : 'border-slate-200 hover:border-slate-300 text-slate-600 hover:bg-slate-50/50'}`
+                          }`}
+                        >
+                          <Pill className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                          <span className="truncate">
+                            {getPresetDisplayName(preset.key, accessibilitySettings.simpleLanguage, preset.medicineName)}
+                          </span>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            toggleFavoriteEbook(ebookKey);
+                          }}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                          title="Remover"
+                        >
+                          <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            )}
+          </div>
+
+          <hr className={styleConfig.comfortDark ? 'border-slate-800' : 'border-slate-100'} />
+
+          {/* Histórico Section */}
+          <div>
+            <button
+              onClick={() => setSidebarHistoryCollapsed(!sidebarHistoryCollapsed)}
+              className={`w-full text-xs font-bold ${styleConfig.comfortDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700'} uppercase tracking-wider mb-3 flex items-center justify-between text-left cursor-pointer`}
+            >
+              <div className="flex items-center gap-1.5">
+                <History className={`w-3.5 h-3.5 ${styleConfig.comfortDark ? 'text-slate-400' : 'text-indigo-500'}`} />
+                Histórico ({recentViews.length})
+              </div>
+              {sidebarHistoryCollapsed ? (
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+              )}
+            </button>
+
+            {!sidebarHistoryCollapsed && (
+              recentViews.length === 0 ? (
+                <div className="p-3 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-center bg-slate-50/30 dark:bg-slate-900/10">
+                  <p className="text-[10px] text-slate-400 dark:text-slate-500 font-semibold">Nenhum histórico</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {recentViews.map(ebookKey => {
+                    const preset = presets.find(p => p.key === ebookKey);
+                    if (!preset) return null;
+                    const isSelected = selectedPreset === ebookKey && !isCustomMode;
+                    return (
+                      <div key={`side-hist-ebook-${ebookKey}`} className="relative group/side-hist-ebook">
+                        <button
+                          onClick={() => handlePresetSelect(ebookKey)}
+                          className={`p-2.5 pr-9 rounded-xl border text-left flex items-center gap-2 transition-all cursor-pointer w-full text-xs font-bold ${
+                            isSelected
+                              ? `${styleConfig.comfortDark ? 'border-indigo-500 bg-indigo-950/40 text-indigo-100' : 'border-indigo-600 bg-indigo-50/50 text-indigo-900'}`
+                              : `${styleConfig.comfortDark ? 'border-slate-800 hover:border-slate-700 text-slate-300 bg-slate-900/50' : 'border-slate-200 hover:border-slate-300 text-slate-600 hover:bg-slate-50/50'}`
+                          }`}
+                        >
+                          <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <span className="truncate">
+                            {getPresetDisplayName(preset.key, accessibilitySettings.simpleLanguage, preset.medicineName)}
+                          </span>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            toggleFavoriteEbook(ebookKey);
+                          }}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                          title="Favoritar"
+                        >
+                          <Star className={`w-3.5 h-3.5 ${favoriteEbooks.includes(ebookKey) ? 'fill-amber-500 text-amber-500' : 'text-slate-450 dark:text-slate-500'}`} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            )}
           </div>
 
           <hr className={styleConfig.comfortDark ? 'border-slate-800' : 'border-slate-100'} />
 
           {/* Accessibility Adjustments */}
-          <div className="space-y-3">
-            <label className={`text-xs font-bold ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'} uppercase tracking-wider block`}>
-              Configurações de Acessibilidade
-            </label>
+          <div>
+            <button
+              onClick={() => setSidebarAccessibilityCollapsed(!sidebarAccessibilityCollapsed)}
+              className={`w-full text-xs font-bold ${styleConfig.comfortDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700'} uppercase tracking-wider mb-3 flex items-center justify-between text-left cursor-pointer`}
+            >
+              <div className="flex items-center gap-1.5">
+                <Settings className={`w-3.5 h-3.5 ${styleConfig.comfortDark ? 'text-slate-400' : 'text-indigo-500'}`} />
+                Configurações de Acessibilidade
+              </div>
+              {sidebarAccessibilityCollapsed ? (
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+              )}
+            </button>
             
-            <div className="space-y-2.5">
-              {/* Simple Language Toggle */}
-              <div className={`flex items-center justify-between p-3 bg-slate-50 rounded-xl border transition-colors ${styleConfig.comfortDark ? 'bg-slate-900/60 border-slate-800/80' : 'bg-slate-50 rounded-xl border-slate-100'}`}>
-                <div>
-                  <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'}`}>Linguagem Simples</span>
-                  <span className={`text-[10px] font-medium ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>Sem termos médicos</span>
-                </div>
-                <button 
-                  id="toggle-simple-lang"
-                  onClick={() => setAccessibilitySettings(prev => ({ ...prev, simpleLanguage: !prev.simpleLanguage }))}
-                  className={`w-11 h-6 rounded-full relative transition-colors ${accessibilitySettings.simpleLanguage ? toggleColorClass : (styleConfig.comfortDark ? 'bg-slate-800' : 'bg-slate-200')}`}
-                >
-                  <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${accessibilitySettings.simpleLanguage ? 'right-1' : 'left-1'}`}></div>
-                </button>
-              </div>
-
-              {/* Colorful Icons Toggle */}
-              <div className={`flex items-center justify-between p-3 bg-slate-50 rounded-xl border transition-colors ${styleConfig.comfortDark ? 'bg-slate-900/60 border-slate-800/80' : 'bg-slate-50 rounded-xl border-slate-100'}`}>
-                <div>
-                  <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'}`}>Pictogramas Coloridos</span>
-                  <span className={`text-[10px] font-medium ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>Destaques visuais coloridos</span>
-                </div>
-                <button 
-                  id="toggle-pictograms"
-                  onClick={() => setAccessibilitySettings(prev => ({ ...prev, colorfulPictograms: !prev.colorfulPictograms }))}
-                  className={`w-11 h-6 rounded-full relative transition-colors ${accessibilitySettings.colorfulPictograms ? toggleColorClass : (styleConfig.comfortDark ? 'bg-slate-800' : 'bg-slate-200')}`}
-                >
-                  <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${accessibilitySettings.colorfulPictograms ? 'right-1' : 'left-1'}`}></div>
-                </button>
-              </div>
-
-              {/* Large Font Size Toggle */}
-              <div className={`flex items-center justify-between p-3 bg-slate-50 rounded-xl border transition-colors ${styleConfig.comfortDark ? 'bg-slate-900/60 border-slate-800/80' : 'bg-slate-50 rounded-xl border-slate-100'}`}>
-                <div>
-                  <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'}`}>Fonte Grande (Leitura)</span>
-                  <span className={`text-[10px] font-medium font-serif ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>Aumenta as letras</span>
-                </div>
-                <button 
-                  id="toggle-large-font"
-                  onClick={() => setAccessibilitySettings(prev => ({ ...prev, largeFont: !prev.largeFont }))}
-                  className={`w-11 h-6 rounded-full relative transition-colors ${accessibilitySettings.largeFont ? toggleColorClass : (styleConfig.comfortDark ? 'bg-slate-800' : 'bg-slate-200')}`}
-                >
-                  <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${accessibilitySettings.largeFont ? 'right-1' : 'left-1'}`}></div>
-                </button>
-              </div>
-
-              {/* Dark Mode Toggle */}
-              <div className={`flex items-center justify-between p-3 bg-slate-50 rounded-xl border transition-colors ${styleConfig.comfortDark ? 'bg-slate-900/60 border-slate-800/80' : 'bg-slate-50 rounded-xl border-slate-100'}`}>
-                <div>
-                  <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'} flex items-center gap-1.5`}>
-                    {darkMode ? <Moon className="w-3.5 h-3.5 text-indigo-400" /> : <Sun className="w-3.5 h-3.5 text-amber-500" />}
-                    Modo Escuro
-                  </span>
-                  <span className={`text-[10px] font-medium ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>Ideal para leitura noturna</span>
-                </div>
-                <button 
-                  id="toggle-dark-mode"
-                  onClick={toggleDarkMode}
-                  className={`w-11 h-6 rounded-full relative transition-colors ${darkMode ? toggleColorClass : (styleConfig.comfortDark ? 'bg-slate-800' : 'bg-slate-200')}`}
-                >
-                  <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${darkMode ? 'right-1' : 'left-1'}`}></div>
-                </button>
-              </div>
-
-              {/* Paywall control if there are unlocked items */}
-              {unlockedMedicines.length > 0 && (
-                <div className="pt-2">
-                  <button
-                    onClick={handleResetPremiumLocks}
-                    className={`w-full py-2 px-4 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 border cursor-pointer ${
-                      styleConfig.comfortDark 
-                        ? 'bg-slate-800 hover:bg-slate-755 text-slate-300 hover:text-white border-slate-700'
-                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 border-slate-200'
-                    }`}
+            {!sidebarAccessibilityCollapsed && (
+              <div className="space-y-2.5">
+                {/* Simple Language Toggle */}
+                <div className={`flex items-center justify-between p-3 bg-slate-50 rounded-xl border transition-colors ${styleConfig.comfortDark ? 'bg-slate-900/60 border-slate-800/80' : 'bg-slate-50 rounded-xl border-slate-100'}`}>
+                  <div>
+                    <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'}`}>Linguagem Simples</span>
+                    <span className={`text-[10px] font-medium ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>Sem termos médicos</span>
+                  </div>
+                  <button 
+                    id="toggle-simple-lang"
+                    onClick={() => setAccessibilitySettings(prev => ({ ...prev, simpleLanguage: !prev.simpleLanguage }))}
+                    className={`w-11 h-6 rounded-full relative transition-colors ${accessibilitySettings.simpleLanguage ? toggleColorClass : (styleConfig.comfortDark ? 'bg-slate-800' : 'bg-slate-200')}`}
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    Restaurar Bloqueios Premium
+                    <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${accessibilitySettings.simpleLanguage ? 'right-1' : 'left-1'}`}></div>
                   </button>
                 </div>
-              )}
-            </div>
+
+                {/* Colorful Icons Toggle */}
+                <div className={`flex items-center justify-between p-3 bg-slate-50 rounded-xl border transition-colors ${styleConfig.comfortDark ? 'bg-slate-900/60 border-slate-800/80' : 'bg-slate-50 rounded-xl border-slate-100'}`}>
+                  <div>
+                    <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'}`}>Pictogramas Coloridos</span>
+                    <span className={`text-[10px] font-medium ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>Destaques visuais coloridos</span>
+                  </div>
+                  <button 
+                    id="toggle-pictograms"
+                    onClick={() => setAccessibilitySettings(prev => ({ ...prev, colorfulPictograms: !prev.colorfulPictograms }))}
+                    className={`w-11 h-6 rounded-full relative transition-colors ${accessibilitySettings.colorfulPictograms ? toggleColorClass : (styleConfig.comfortDark ? 'bg-slate-800' : 'bg-slate-200')}`}
+                  >
+                    <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${accessibilitySettings.colorfulPictograms ? 'right-1' : 'left-1'}`}></div>
+                  </button>
+                </div>
+
+                {/* Large Font Size Toggle */}
+                <div className={`flex items-center justify-between p-3 bg-slate-50 rounded-xl border transition-colors ${styleConfig.comfortDark ? 'bg-slate-900/60 border-slate-800/80' : 'bg-slate-50 rounded-xl border-slate-100'}`}>
+                  <div>
+                    <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'}`}>Fonte Grande (Leitura)</span>
+                    <span className={`text-[10px] font-medium font-serif ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>Aumenta as letras</span>
+                  </div>
+                  <button 
+                    id="toggle-large-font"
+                    onClick={() => setAccessibilitySettings(prev => ({ ...prev, largeFont: !prev.largeFont }))}
+                    className={`w-11 h-6 rounded-full relative transition-colors ${accessibilitySettings.largeFont ? toggleColorClass : (styleConfig.comfortDark ? 'bg-slate-800' : 'bg-slate-200')}`}
+                  >
+                    <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${accessibilitySettings.largeFont ? 'right-1' : 'left-1'}`}></div>
+                  </button>
+                </div>
+
+                {/* Dark Mode Toggle */}
+                <div className={`flex items-center justify-between p-3 bg-slate-50 rounded-xl border transition-colors ${styleConfig.comfortDark ? 'bg-slate-900/60 border-slate-800/80' : 'bg-slate-50 rounded-xl border-slate-100'}`}>
+                  <div>
+                    <span className={`text-xs font-bold block ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'} flex items-center gap-1.5`}>
+                      {darkMode ? <Moon className="w-3.5 h-3.5 text-indigo-400" /> : <Sun className="w-3.5 h-3.5 text-amber-500" />}
+                      Modo Escuro
+                    </span>
+                    <span className={`text-[10px] font-medium ${styleConfig.comfortDark ? 'text-slate-500' : 'text-slate-400'}`}>Ideal para leitura noturna</span>
+                  </div>
+                  <button 
+                    id="toggle-dark-mode"
+                    onClick={toggleDarkMode}
+                    className={`w-11 h-6 rounded-full relative transition-colors ${darkMode ? toggleColorClass : (styleConfig.comfortDark ? 'bg-slate-800' : 'bg-slate-200')}`}
+                  >
+                    <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${darkMode ? 'right-1' : 'left-1'}`}></div>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Paywall control if there are unlocked items */}
+            {unlockedMedicines.length > 0 && (
+              <div className="pt-4 border-t border-slate-150 dark:border-slate-800 mt-4">
+                <button
+                  onClick={handleResetPremiumLocks}
+                  className={`w-full py-2 px-4 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 border cursor-pointer ${
+                    styleConfig.comfortDark 
+                      ? 'bg-slate-800 hover:bg-slate-755 text-slate-300 hover:text-white border-slate-700'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 border-slate-200'
+                  }`}
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Restaurar Bloqueios Premium
+                </button>
+              </div>
+            )}
           </div>
+
         </div>
+
+        {/* Bottom Footer (Static/Fixed at the bottom) - Now the Brand Logo */}
+        <div className="flex-shrink-0 pt-4 border-t border-slate-150 dark:border-slate-800 mt-4 flex justify-center">
+          <button
+            onClick={() => {
+              setShowHome(true);
+              setSelectedCategory(null);
+              setShowProfile(false);
+              setShowMyMedicines(false);
+              stopSpeaking();
+              if (window.innerWidth < 768) {
+                setSidebarOpen(false);
+              }
+            }}
+            className="flex items-center gap-3 text-left hover:opacity-85 transition-opacity cursor-pointer w-full justify-center py-1"
+            title="Voltar ao início"
+          >
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-white font-extrabold shadow-sm shrink-0 ${
+              styleConfig.themeKey === 'emerald' 
+                ? 'bg-emerald-600' 
+                : styleConfig.themeKey === 'amber' 
+                  ? 'bg-amber-600' 
+                  : styleConfig.themeKey === 'blue' 
+                    ? 'bg-blue-600' 
+                    : 'bg-indigo-600'
+            }`}>
+              M
+            </div>
+            <div className="min-w-0">
+              <h1 className={`text-xl font-extrabold tracking-tight ${styleConfig.sidebarTitle} leading-none flex items-baseline gap-1`}>
+                <span className={`text-[9px] ${styleConfig.labelColor} font-semibold uppercase tracking-widest`}>do</span>
+                <span>MediQuês</span>
+              </h1>
+              <span className={`text-[10px] ${styleConfig.labelColor} font-semibold uppercase tracking-widest block mt-1`}>para o português</span>
+            </div>
+          </button>
+        </div>
+
         </div>
 
       </aside>
 
       {/* Main Preview and Interaction Area */}
-      <main id="clarifarma-main" className={`flex-1 flex flex-col min-h-0 ${styleConfig.mainBg} transition-all duration-300`}>
+      <main id="clarifarma-main" className={`flex-1 flex flex-col min-h-0 ${styleConfig.mainBg} transition-all duration-300 ${!sidebarOpen ? 'pl-16 md:pl-20' : ''}`}>
         
-        {/* Custom Input Mode / Analyzer */}
-        {isCustomMode ? (
+        {showProfile ? (
+          /* Profile Info Page */
+          <div className="flex-1 p-4 md:p-8 flex flex-col max-w-3xl mx-auto w-full space-y-6 overflow-y-auto animate-in fade-in duration-300 text-left">
+            {/* Header section with back button */}
+            <div className={`flex flex-col md:flex-row md:items-center justify-between p-5 border ${styleConfig.cardBorder} ${styleConfig.subHeaderBg} rounded-2xl gap-4 shadow-xs`}>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    setShowProfile(false);
+                    setShowHome(true);
+                  }}
+                  className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs font-bold ${
+                    styleConfig.comfortDark 
+                      ? 'border-slate-850 bg-slate-900 text-indigo-400 hover:bg-slate-800 hover:text-indigo-300' 
+                      : 'border-slate-200 bg-white text-indigo-600 hover:bg-slate-50 shadow-xs hover:text-indigo-700'
+                  }`}
+                  title="Voltar ao início"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  Voltar ao Início
+                </button>
+                <div>
+                  <h2 className={`text-base font-extrabold ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-800'} leading-none flex items-center gap-2`}>
+                    <UserIcon className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                    Informações do Perfil 👤
+                  </h2>
+                  <p className="text-[11px] text-slate-400 mt-1 font-semibold">
+                    Visualize estatísticas de uso, preferências de leitura e gerencie sua sessão.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Profile Detail Card */}
+            <div className={`p-6 rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} shadow-sm space-y-6`}>
+              <div className="flex flex-col sm:flex-row items-center gap-5 pb-6 border-b border-slate-100 dark:border-slate-850">
+                {user?.photoURL ? (
+                  <img src={user.photoURL} alt="Avatar" className="w-20 h-20 rounded-full border-2 border-indigo-500 shadow-md" referrerPolicy="no-referrer" />
+                ) : (
+                  <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-600 text-white flex items-center justify-center font-black text-3xl shadow-md">
+                    {userName ? userName.charAt(0).toUpperCase() : (user?.email ? user.email.charAt(0).toUpperCase() : 'U')}
+                  </div>
+                )}
+                <div className="text-center sm:text-left space-y-1">
+                  <h3 className={`text-lg font-extrabold ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                    {userName || user?.displayName || 'Usuário do MediQuês'}
+                  </h3>
+                  <p className="text-xs text-slate-400 font-medium">
+                    {user?.email || 'Nenhum e-mail cadastrado'}
+                  </p>
+                  <div className="flex flex-wrap gap-2 pt-1 justify-center sm:justify-start">
+                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-slate-850 text-indigo-600 dark:text-indigo-400 border border-indigo-100 dark:border-slate-800">
+                      Conta Sincronizada ☁️
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Statistics Grid */}
+              <div className="space-y-3">
+                <h4 className={`text-xs font-bold uppercase tracking-wider ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                  Estatísticas de Uso
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className={`p-4 rounded-xl border ${styleConfig.itemBg} flex items-center gap-3.5`}>
+                    <div className="p-2 bg-indigo-50 dark:bg-slate-900 rounded-lg border border-indigo-100 dark:border-slate-800 text-indigo-500">
+                      <Pill className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className={`text-lg font-black block ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-900'} leading-none`}>
+                        {myMedicines.length}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block mt-1">Remédios</span>
+                    </div>
+                  </div>
+
+                  <div className={`p-4 rounded-xl border ${styleConfig.itemBg} flex items-center gap-3.5`}>
+                    <div className="p-2 bg-amber-50 dark:bg-slate-900 rounded-lg border border-amber-100 dark:border-slate-800 text-amber-500">
+                      <Star className="w-5 h-5 fill-amber-500 text-amber-500" />
+                    </div>
+                    <div>
+                      <span className={`text-lg font-black block ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-900'} leading-none`}>
+                        {favoriteFolders.length + favoriteEbooks.length}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block mt-1">Favoritos</span>
+                    </div>
+                  </div>
+
+                  <div className={`p-4 rounded-xl border ${styleConfig.itemBg} flex items-center gap-3.5`}>
+                    <div className="p-2 bg-emerald-50 dark:bg-slate-900 rounded-lg border border-emerald-100 dark:border-slate-800 text-emerald-500">
+                      <Clock className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className={`text-lg font-black block ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-900'} leading-none`}>
+                        {recentViews.length}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block mt-1">Lidos Recentemente</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Adherence Compliance Card */}
+              <div className={`p-5 rounded-2xl border ${styleConfig.cardBorder} ${styleConfig.cardBg} space-y-4 shadow-sm text-left`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-850 pb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 bg-emerald-50 dark:bg-slate-950/30 rounded-lg border border-emerald-100 dark:border-slate-900/30 text-emerald-500 shrink-0">
+                      <Activity className="w-5 h-5 animate-pulse" />
+                    </div>
+                    <div>
+                      <h4 className={`text-sm font-extrabold ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                        📈 Adesão e Conformidade com o Tratamento
+                      </h4>
+                      <p className="text-[10px] text-slate-400 font-semibold">
+                        Acompanhamento mensal do seu consumo de medicamentos
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 self-start sm:self-center">
+                    <span className={`text-2xl font-black ${
+                      getMonthlyCompliance() >= 85 
+                        ? 'text-emerald-500 dark:text-emerald-400' 
+                        : getMonthlyCompliance() >= 50 
+                        ? 'text-amber-500 dark:text-amber-400' 
+                        : 'text-rose-500 dark:text-rose-400'
+                    }`}>
+                      {getMonthlyCompliance()}%
+                    </span>
+                    <span className="text-[10px] font-bold text-slate-400">de conformidade</span>
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                <div className="space-y-1.5">
+                  <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-3.5 overflow-hidden border border-slate-200/50 dark:border-slate-800">
+                    <div 
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        getMonthlyCompliance() >= 85 
+                          ? 'bg-gradient-to-r from-emerald-500 to-teal-500 shadow-xs' 
+                          : getMonthlyCompliance() >= 50 
+                          ? 'bg-gradient-to-r from-amber-500 to-orange-500 shadow-xs' 
+                          : 'bg-gradient-to-r from-rose-500 to-pink-500 shadow-xs'
+                      }`}
+                      style={{ width: `${getMonthlyCompliance()}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-semibold">
+                    <span>Tratamento Irregular (0%)</span>
+                    <span>Meta Clínica (85%)</span>
+                    <span>Excelente (100%)</span>
+                  </div>
+                </div>
+
+                <p className="text-xs text-slate-400 leading-relaxed font-semibold">
+                  💡 <strong>Como é calculado:</strong> Esta taxa reflete a quantidade de doses diárias que você confirmou ter tomado (clicando em "Já tomei" nos lembretes ou no controle diário) em relação ao total de doses programadas na sua receita para o mês atual. Manter a conformidade acima de <strong>85%</strong> é fundamental para a eficácia do seu tratamento!
+                </p>
+              </div>
+
+              {/* Preferences Summary */}
+              <div className="space-y-3 pt-2">
+                <h4 className={`text-xs font-bold uppercase tracking-wider ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                  Preferências de Acessibilidade
+                </h4>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className={`p-3 rounded-xl border ${styleConfig.itemBg} text-center space-y-1`}>
+                    <span className="text-[10px] text-slate-400 font-semibold block uppercase tracking-wider">Linguagem Simples</span>
+                    <span className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${accessibilitySettings.simpleLanguage ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/30' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>
+                      {accessibilitySettings.simpleLanguage ? 'Ativa' : 'Inativa'}
+                    </span>
+                  </div>
+
+                  <div className={`p-3 rounded-xl border ${styleConfig.itemBg} text-center space-y-1`}>
+                    <span className="text-[10px] text-slate-400 font-semibold block uppercase tracking-wider">Pictogramas</span>
+                    <span className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${accessibilitySettings.colorfulPictograms ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/30' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>
+                      {accessibilitySettings.colorfulPictograms ? 'Coloridos' : 'Inativos'}
+                    </span>
+                  </div>
+
+                  <div className={`p-3 rounded-xl border ${styleConfig.itemBg} text-center space-y-1`}>
+                    <span className="text-[10px] text-slate-400 font-semibold block uppercase tracking-wider">Fonte Grande</span>
+                    <span className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${accessibilitySettings.largeFont ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/30' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>
+                      {accessibilitySettings.largeFont ? 'Ativa' : 'Inativa'}
+                    </span>
+                  </div>
+
+                  <div className={`p-3 rounded-xl border ${styleConfig.itemBg} text-center space-y-1`}>
+                    <span className="text-[10px] text-slate-400 font-semibold block uppercase tracking-wider">Modo Escuro</span>
+                    <span className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${darkMode ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/30' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>
+                      {darkMode ? 'Ativo' : 'Inativo'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Logout Action */}
+              <div className="pt-6 border-t border-slate-100 dark:border-slate-850 flex flex-col sm:flex-row gap-3 justify-between items-center">
+                <p className="text-[11px] text-slate-400 font-semibold text-center sm:text-left">
+                  Suas receitas, favoritos e histórico são sincronizados automaticamente em tempo real com a nuvem do Firebase.
+                </p>
+                <button
+                  onClick={() => {
+                    handleSignOut();
+                    setShowProfile(false);
+                    setShowHome(true);
+                  }}
+                  className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 hover:scale-[1.01] active:scale-[0.99] text-white text-xs font-bold rounded-xl shadow-md transition-all cursor-pointer flex items-center justify-center gap-2 shrink-0"
+                >
+                  <LogOut className="w-4 h-4" />
+                  Sair da Conta (Logout)
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : showMyMedicines ? (
+          /* "Meus Remédios" Page */
+          <div className="flex-1 p-4 md:p-8 flex flex-col max-w-5xl mx-auto w-full space-y-6 overflow-y-auto animate-in fade-in duration-300 text-left">
+            {/* Header section with back button */}
+            <div className={`flex flex-col md:flex-row md:items-center justify-between p-5 border ${styleConfig.cardBorder} ${styleConfig.subHeaderBg} rounded-2xl gap-4 shadow-xs`}>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    setShowMyMedicines(false);
+                    setShowHome(true);
+                  }}
+                  className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs font-bold ${
+                    styleConfig.comfortDark 
+                      ? 'border-slate-850 bg-slate-900 text-indigo-400 hover:bg-slate-800 hover:text-indigo-300' 
+                      : 'border-slate-200 bg-white text-indigo-600 hover:bg-slate-50 shadow-xs hover:text-indigo-700'
+                  }`}
+                  title="Voltar ao início"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  Voltar ao Início
+                </button>
+                <div>
+                  <h2 className={`text-base font-extrabold ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-800'} leading-none flex items-center gap-2`}>
+                    <Pill className="w-5 h-5 text-indigo-600 dark:text-indigo-400 animate-pulse" />
+                    Meus Remédios & Receita 📋
+                  </h2>
+                  <p className="text-[11px] text-slate-400 mt-1 font-semibold">
+                    Crie e visualize sua receita completa com doses, horários e lembretes automáticos salvos na sua conta.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2.5 self-end md:self-auto">
+                {myMedicines.length > 0 && (
+                  <button
+                    onClick={downloadMedicinesPDF}
+                    className={`px-4 py-2.5 rounded-xl border font-bold text-xs shadow-xs transition-all cursor-pointer flex items-center gap-1.5 hover:scale-[1.02] active:scale-[0.98] ${
+                      styleConfig.comfortDark
+                        ? 'bg-slate-800 hover:bg-slate-750 text-indigo-400 border-slate-700'
+                        : 'bg-white hover:bg-slate-50 text-indigo-600 border-slate-200'
+                    }`}
+                    title="Baixar lista de remédios em PDF"
+                  >
+                    <Download className="w-4 h-4 text-indigo-500" />
+                    Gerar PDF (Imprimir)
+                  </button>
+                )}
+
+                <button
+                  onClick={() => {
+                    // Reset form for adding new medicine
+                    setEditingMedicineId(null);
+                    setRecipeName('');
+                    setRecipeDose('');
+                    setRecipeTimesPerDay('1');
+                    setRecipeTimes(['08:00']);
+                    setRecipeInstructions('');
+                    setIsAddingMedicine(!isAddingMedicine);
+                  }}
+                  className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-md transition-all cursor-pointer flex items-center gap-1.5 hover:scale-[1.02] active:scale-[0.98]"
+                >
+                  {isAddingMedicine ? (
+                    <>Fechar Formulário</>
+                  ) : (
+                    <>
+                      <Plus className="w-4 h-4" />
+                      Adicionar Remédio
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Collapsible Add/Edit Form */}
+            {isAddingMedicine && (
+              <div className={`p-6 rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} shadow-md space-y-5 animate-in slide-in-from-top-3 duration-300`}>
+                <div className="flex items-center justify-between border-b pb-2 border-slate-100 dark:border-slate-850">
+                  <h3 className={`text-sm font-extrabold ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-800'} flex items-center gap-1.5`}>
+                    <Plus className="w-4 h-4 text-indigo-500" />
+                    {editingMedicineId ? 'Editar Medicamento Receitado' : 'Adicionar Novo Medicamento à Receita'}
+                  </h3>
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      setIsAddingMedicine(false);
+                      setEditingMedicineId(null);
+                    }}
+                    className="text-slate-400 hover:text-slate-600 text-xs font-bold cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+
+                <form onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!recipeName.trim()) {
+                    alert('Por favor, informe o nome do remédio.');
+                    return;
+                  }
+
+                  const medData: MyMedicine = {
+                    id: editingMedicineId || 'manual_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+                    medicineName: recipeName.trim(),
+                    dose: recipeDose.trim() || 'Sob demanda',
+                    timesPerDay: recipeTimesPerDay,
+                    times: [...recipeTimes].sort(),
+                    instructions: recipeInstructions.trim() || 'Tomar conforme orientação médica.'
+                  };
+
+                  let updatedMeds: MyMedicine[];
+                  if (editingMedicineId) {
+                    updatedMeds = myMedicines.map(m => m.id === editingMedicineId ? medData : m);
+                  } else {
+                    updatedMeds = [...myMedicines, medData];
+                  }
+
+                  await saveMyMedicines(updatedMeds);
+                  
+                  // Reset form and close
+                  setRecipeName('');
+                  setRecipeDose('');
+                  setRecipeTimesPerDay('1');
+                  setRecipeTimes(['08:00']);
+                  setRecipeInstructions('');
+                  setEditingMedicineId(null);
+                  setIsAddingMedicine(false);
+                }} className="space-y-4 text-xs font-medium">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Medicine Name */}
+                    <div className="space-y-1.5">
+                      <label className={`text-[11px] font-bold uppercase tracking-wider ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Nome do Medicamento *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={recipeName}
+                        onChange={(e) => setRecipeName(e.target.value)}
+                        placeholder="Ex: Losartana Potássica, Metformina, etc."
+                        className={`w-full px-4 py-2.5 rounded-xl border ${
+                          styleConfig.comfortDark ? 'bg-slate-900 border-slate-800 text-slate-100 focus:ring-indigo-500' : 'bg-white border-slate-200 text-slate-800 focus:ring-indigo-500'
+                        } focus:outline-none focus:ring-2`}
+                      />
+                    </div>
+
+                    {/* Dosage */}
+                    <div className="space-y-1.5">
+                      <label className={`text-[11px] font-bold uppercase tracking-wider ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Dose ou Dosagem
+                      </label>
+                      <input
+                        type="text"
+                        value={recipeDose}
+                        onChange={(e) => setRecipeDose(e.target.value)}
+                        placeholder="Ex: 50mg, 1 comprimido, 5ml"
+                        className={`w-full px-4 py-2.5 rounded-xl border ${
+                          styleConfig.comfortDark ? 'bg-slate-900 border-slate-800 text-slate-100 focus:ring-indigo-500' : 'bg-white border-slate-200 text-slate-800 focus:ring-indigo-500'
+                        } focus:outline-none focus:ring-2`}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Times per day select */}
+                    <div className="space-y-1.5">
+                      <label className={`text-[11px] font-bold uppercase tracking-wider ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Quantas vezes ao dia?
+                      </label>
+                      <select
+                        value={recipeTimesPerDay}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setRecipeTimesPerDay(val);
+                          const count = val === 'Outro' ? 1 : parseInt(val, 10) || 1;
+                          // prefill or crop times array
+                          const newTimes = Array.from({ length: count }, (_, idx) => {
+                            return recipeTimes[idx] || ['08:00', '14:00', '20:00', '22:00'][idx] || '08:00';
+                          });
+                          setRecipeTimes(newTimes);
+                        }}
+                        className={`w-full px-4 py-2.5 rounded-xl border ${
+                          styleConfig.comfortDark ? 'bg-slate-900 border-slate-800 text-slate-100 focus:ring-indigo-500' : 'bg-white border-slate-200 text-slate-800 focus:ring-indigo-500'
+                        } focus:outline-none focus:ring-2`}
+                      >
+                        <option value="1">1 vez ao dia</option>
+                        <option value="2">2 vezes ao dia</option>
+                        <option value="3">3 vezes ao dia</option>
+                        <option value="4">4 vezes ao dia</option>
+                        <option value="Outro">Outro / Sob Demanda</option>
+                      </select>
+                    </div>
+
+                    {/* Specific Alarm Hours */}
+                    <div className="space-y-1.5">
+                      <label className={`text-[11px] font-bold uppercase tracking-wider ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Definir Horários do Alarme
+                      </label>
+                      <div className="flex flex-wrap gap-2.5">
+                        {recipeTimes.map((time, idx) => (
+                          <div key={idx} className="flex items-center gap-1">
+                            <span className="text-[10px] font-bold text-slate-450">#{idx + 1}:</span>
+                            <input
+                              type="time"
+                              required
+                              value={time}
+                              onChange={(e) => {
+                                const newTimes = [...recipeTimes];
+                                newTimes[idx] = e.target.value;
+                                setRecipeTimes(newTimes);
+                              }}
+                              className={`px-3 py-1.5 rounded-lg border text-xs font-bold ${
+                                styleConfig.comfortDark ? 'bg-slate-900 border-slate-800 text-slate-250' : 'bg-white border-slate-200 text-slate-700'
+                              }`}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Instructions */}
+                  <div className="space-y-1.5">
+                    <label className={`text-[11px] font-bold uppercase tracking-wider ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                      Instruções Adicionais (Como tomar)
+                    </label>
+                    <textarea
+                      value={recipeInstructions}
+                      onChange={(e) => setRecipeInstructions(e.target.value)}
+                      placeholder="Ex: Tomar com água em jejum pela manhã, não partir ou mastigar..."
+                      rows={3}
+                      className={`w-full p-3 rounded-xl border ${
+                        styleConfig.comfortDark ? 'bg-slate-900 border-slate-800 text-slate-100 focus:ring-indigo-500' : 'bg-white border-slate-200 text-slate-800 focus:ring-indigo-500'
+                      } focus:outline-none focus:ring-2`}
+                    ></textarea>
+                  </div>
+
+                  <div className="flex justify-end gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsAddingMedicine(false);
+                        setEditingMedicineId(null);
+                      }}
+                      className={`px-5 py-2.5 rounded-xl border font-bold text-xs transition-all cursor-pointer ${
+                        styleConfig.comfortDark ? 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-750' : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      {editingMedicineId ? 'Salvar Alterações' : 'Salvar Medicamento'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* Interactive Daily Adherence Log Section */}
+            {(myMedicines.length > 0 || Object.keys(reminders).length > 0) && (
+              <div className={`p-5 rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} shadow-xs space-y-4 text-left animate-in fade-in slide-in-from-top-4 duration-300`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-850 pb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 bg-indigo-50 dark:bg-slate-950/20 rounded-lg border border-indigo-100 dark:border-indigo-900/30 text-indigo-500 shrink-0">
+                      <Heart className="w-5 h-5 text-indigo-500 animate-pulse" />
+                    </div>
+                    <div>
+                      <h3 className={`text-sm font-extrabold ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-800'}`}>
+                        📋 Controle de Tomada de Hoje (Adesão Diária)
+                      </h3>
+                      <p className="text-[10px] text-slate-400 font-semibold">
+                        Marque "Já tomei" ao consumir cada dose para manter seu tratamento em dia!
+                      </p>
+                    </div>
+                  </div>
+                  
+                  {/* Progress info */}
+                  {(() => {
+                    const todaysScheduled = getTodaysScheduledDoses();
+                    const takenTodayCount = todaysScheduled.filter(d => isDoseTakenToday(d.medicineName, d.time)).length;
+                    const totalScheduledCount = todaysScheduled.length;
+                    const percent = totalScheduledCount > 0 ? Math.round((takenTodayCount / totalScheduledCount) * 100) : 100;
+                    
+                    return (
+                      <div className="flex items-center gap-3">
+                        <div className="text-right">
+                          <span className="text-xs font-black text-slate-700 dark:text-slate-300">
+                            {takenTodayCount} de {totalScheduledCount} doses
+                          </span>
+                          <span className="text-[10px] text-indigo-500 dark:text-indigo-400 font-extrabold block">
+                            {percent}% concluído hoje
+                          </span>
+                        </div>
+                        <div className="w-12 h-12 rounded-full border-4 border-slate-150 dark:border-slate-800 flex items-center justify-center relative bg-slate-50 dark:bg-slate-900">
+                          <span className="text-[10px] font-black text-slate-850 dark:text-slate-200">
+                            {percent}%
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Grid list of today's scheduled doses */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                  {getTodaysScheduledDoses().map((dose) => {
+                    const taken = isDoseTakenToday(dose.medicineName, dose.time);
+                    const takenTime = getDoseTakenTimeToday(dose.medicineName, dose.time);
+
+                    return (
+                      <div 
+                        key={dose.id} 
+                        className={`p-3.5 rounded-xl border flex flex-col justify-between gap-3.5 transition-all ${
+                          taken 
+                            ? 'bg-emerald-500/5 border-emerald-500/20 dark:bg-emerald-500/10 dark:border-emerald-500/30' 
+                            : styleConfig.comfortDark 
+                            ? 'bg-slate-900/40 border-slate-800 hover:border-slate-750' 
+                            : 'bg-slate-50/50 border-slate-150 hover:bg-slate-50 hover:border-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3 min-w-0">
+                          <div className={`p-2 rounded-lg shrink-0 mt-0.5 ${
+                            taken 
+                              ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' 
+                              : styleConfig.comfortDark 
+                              ? 'bg-slate-850 text-indigo-400 border border-slate-800' 
+                              : 'bg-indigo-50 text-indigo-600 border border-indigo-100/50'
+                          }`}>
+                            <Pill className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className={`px-2 py-0.5 text-[9px] font-black rounded-md border flex items-center gap-1 ${
+                                taken 
+                                  ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400' 
+                                  : styleConfig.comfortDark 
+                                  ? 'bg-slate-900 border-slate-800 text-indigo-400' 
+                                  : 'bg-white border-indigo-100 text-indigo-600'
+                              }`}>
+                                <Clock className="w-2.5 h-2.5" />
+                                {dose.time}
+                              </span>
+                              {dose.type === 'ebook' && (
+                                <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-100/40">
+                                  Livro
+                                </span>
+                              )}
+                            </div>
+                            <h4 className={`text-xs font-extrabold truncate mt-2 ${
+                              taken 
+                                ? 'text-emerald-700 dark:text-emerald-350 line-through' 
+                                : styleConfig.comfortDark 
+                                ? 'text-slate-200' 
+                                : 'text-slate-700'
+                            }`}>
+                              {dose.medicineName}
+                            </h4>
+                            <p className="text-[9px] text-slate-400 truncate mt-0.5 font-medium">
+                              {dose.dose}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Action state button */}
+                        <div>
+                          {taken ? (
+                            <div className="w-full py-2 bg-emerald-500/10 border border-emerald-500/25 rounded-lg text-[10px] font-black text-emerald-600 dark:text-emerald-400 flex items-center justify-center gap-1">
+                              <Check className="w-3.5 h-3.5" />
+                              Tomado às {takenTime}
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => logDoseTaken(dose.medicineName, dose.dose, dose.time)}
+                              className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-lg text-[10px] transition-all hover:scale-[1.01] active:scale-[0.99] flex items-center justify-center gap-1 cursor-pointer shadow-xs"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              Já tomei 👍
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* List / Recipe Dashboard Grid */}
+            {myMedicines.length === 0 ? (
+              /* Beautiful Empty State */
+              <div className={`p-10 rounded-2xl border text-center ${styleConfig.cardBg} ${styleConfig.cardBorder} space-y-4 shadow-2xs`}>
+                <div className="w-16 h-16 bg-indigo-50 dark:bg-slate-900 rounded-full flex items-center justify-center mx-auto border border-indigo-100 dark:border-slate-850">
+                  <Pill className="w-8 h-8 text-indigo-500 animate-pulse" />
+                </div>
+                <div className="space-y-1.5 max-w-lg mx-auto">
+                  <h3 className={`text-base font-extrabold ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-800'}`}>
+                    Sua prateleira de remédios está vazia!
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed font-semibold">
+                    Comece a montar sua receita diária clicando em <strong>Adicionar Remédio</strong> acima para inserir manualmente. 
+                  </p>
+                  <p className="text-[11px] text-slate-400 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-xl border border-slate-100 dark:border-slate-850 mt-2 font-medium">
+                    💡 <strong>Dica Inteligente:</strong> Ao navegar pelos E-books simplificados (Losartana, Metformina, etc.), você pode configurar horários diretamente nas páginas de posologia! Eles serão importados automaticamente para esta página e salvos na sua conta.
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setEditingMedicineId(null);
+                    setRecipeName('');
+                    setRecipeDose('');
+                    setRecipeTimesPerDay('1');
+                    setRecipeTimes(['08:00']);
+                    setRecipeInstructions('');
+                    setIsAddingMedicine(true);
+                  }}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-md transition-all cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  Cadastrar Meu Primeiro Remédio
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {myMedicines.map((med) => (
+                  <div 
+                    key={med.id}
+                    className={`p-5 rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} hover:shadow-md transition-all relative flex flex-col justify-between text-left shadow-xs`}
+                  >
+                    <div>
+                      {/* Title and badges */}
+                      <div className="flex items-start justify-between gap-3 border-b border-slate-100 dark:border-slate-850 pb-3 mb-3">
+                        <div className="min-w-0">
+                          <h4 className={`text-sm font-extrabold truncate ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-800'}`}>
+                            {med.medicineName}
+                          </h4>
+                          <span className={`inline-block text-[9px] font-extrabold px-2 py-0.5 rounded-full mt-1 ${
+                            styleConfig.comfortDark ? 'bg-slate-900 border border-slate-800 text-indigo-400' : 'bg-indigo-50 border border-indigo-100 text-indigo-600'
+                          }`}>
+                            💊 {med.dose || 'Dose sob demanda'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          <button
+                            onClick={() => {
+                              // Edit medicine
+                              setEditingMedicineId(med.id);
+                              setRecipeName(med.medicineName);
+                              setRecipeDose(med.dose);
+                              setRecipeTimesPerDay(med.timesPerDay);
+                              setRecipeTimes(med.times);
+                              setRecipeInstructions(med.instructions);
+                              setIsAddingMedicine(true);
+                              // Scroll form into view
+                              window.scrollTo({ top: 0, behavior: 'smooth' });
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50/50 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer border border-transparent hover:border-indigo-100 dark:hover:border-slate-800"
+                            title="Editar remédio"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={async () => {
+                              if (confirm(`Remover ${med.medicineName} da sua lista de remédios?`)) {
+                                const updated = myMedicines.filter(m => m.id !== med.id);
+                                await saveMyMedicines(updated);
+                              }
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-rose-500 hover:bg-rose-50/50 dark:hover:bg-rose-950/20 rounded-lg transition-all cursor-pointer border border-transparent hover:border-rose-100 dark:hover:border-rose-950"
+                            title="Remover remédio"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Schedule times list */}
+                      <div className="space-y-1.5">
+                        <span className="text-[9px] font-bold text-slate-450 uppercase tracking-widest block font-bold">Horários definidos:</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {med.times.map((t, tIdx) => (
+                            <div key={tIdx} className={`px-2.5 py-1 text-xs font-extrabold rounded-lg border flex items-center gap-1 shadow-3xs ${
+                              styleConfig.comfortDark 
+                                ? 'bg-slate-900 border-slate-800/80 text-indigo-400' 
+                                : 'bg-white border-indigo-100 text-indigo-600'
+                            }`}>
+                              <Clock className="w-3 h-3 animate-pulse text-indigo-500" />
+                              {t}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Instructions */}
+                      <div className="space-y-1 mt-3">
+                        <span className="text-[9px] font-bold text-slate-450 uppercase tracking-widest block font-bold">Como tomar:</span>
+                        <p className={`text-xs ${styleConfig.comfortDark ? 'text-slate-300 font-medium' : 'text-slate-650'} leading-relaxed`}>
+                          {med.instructions}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Source Link back to simplified Ebook */}
+                    {med.sourceEbookKey && (
+                      <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-850/60 flex justify-end">
+                        <button
+                          onClick={() => {
+                            setShowMyMedicines(false);
+                            handlePresetSelect(med.sourceEbookKey!);
+                          }}
+                          className={`text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 hover:underline cursor-pointer ${
+                            styleConfig.comfortDark ? 'text-indigo-400 hover:text-indigo-300' : 'text-indigo-650 hover:text-indigo-800'
+                          }`}
+                        >
+                          Ver Guia Simplificado 📖
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Sticky/bottom instruction cards */}
+            <div className={`p-5 rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} flex flex-col md:flex-row gap-5 items-center justify-between bg-gradient-to-r from-emerald-500/5 to-teal-500/5 dark:from-emerald-950/5 dark:to-teal-950/5`}>
+              <div className="flex items-center gap-3 text-center md:text-left">
+                <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-950 flex items-center justify-center shrink-0">
+                  <Bell className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                </div>
+                <div>
+                  <h4 className={`text-xs font-extrabold ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-800'} uppercase tracking-wider`}>
+                    🔔 Como funcionam os avisos?
+                  </h4>
+                  <p className="text-[11px] text-slate-400 leading-relaxed mt-0.5 font-semibold">
+                    Mantenha esta aba aberta no seu navegador ou celular. O sistema monitora seus remédios em tempo real e emite um alerta visual e sonoro sempre que atingir o horário da sua dose!
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : isCustomMode ? (
           <div className="flex-1 p-6 md:p-10 flex flex-col max-w-3xl mx-auto w-full justify-center">
             <div className={`${styleConfig.cardBg} ${styleConfig.cardBorder} rounded-2xl p-6 md:p-8 shadow-md space-y-6 transition-all duration-300`}>
               <div>
@@ -2605,6 +4828,8 @@ export default function App() {
                       setShowHome(false);
                       setSearchQuery('');
                       setSidebarInputVal('');
+                      setSelectedPreset('');
+                      setCurrentEbook(null);
                     }}
                     className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-md transition-all cursor-pointer whitespace-nowrap hover:scale-[1.02] active:scale-[0.98]"
                   >
@@ -2621,7 +4846,7 @@ export default function App() {
                 {(favoriteFolders.length > 0 || favoriteEbooks.length > 0) && (
                   <div className={`p-5 rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} space-y-4 shadow-sm text-left`}>
                     <div className="flex items-center gap-2">
-                      <Heart className="w-4 h-4 text-rose-500 fill-rose-500" />
+                      <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
                       <h3 className={`text-xs font-bold uppercase tracking-widest block ${styleConfig.comfortDark ? 'text-slate-300' : 'text-slate-700'}`}>Meus Guias Favoritos</h3>
                     </div>
 
@@ -2650,6 +4875,8 @@ export default function App() {
                                       setIsCustomMode(false);
                                       setSidebarOpen(true);
                                       setOpenFolders(prev => ({ ...prev, [folderId]: true }));
+                                      setSelectedPreset('');
+                                      setCurrentEbook(null);
                                     }}
                                     className={`p-3.5 rounded-2xl border text-left flex flex-col justify-between gap-2.5 transition-all cursor-pointer shadow-xs hover:shadow-md hover:scale-[1.01] w-full ${catData.color}`}
                                   >
@@ -2671,10 +4898,10 @@ export default function App() {
                                       e.preventDefault();
                                       toggleFavoriteFolder(folderId);
                                     }}
-                                    className="absolute top-3 right-3 p-1.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-rose-500 shadow-sm border border-slate-100 dark:border-slate-800 transition-colors cursor-pointer"
+                                    className="absolute top-3 right-3 p-1.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-amber-500 shadow-sm border border-slate-100 dark:border-slate-800 transition-colors cursor-pointer"
                                     title="Remover dos favoritos"
                                   >
-                                    <Heart className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
+                                    <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" />
                                   </button>
                                 </div>
                               );
@@ -2723,10 +4950,10 @@ export default function App() {
                                       e.preventDefault();
                                       toggleFavoriteEbook(ebookKey);
                                     }}
-                                    className={`p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-rose-500 transition-colors shrink-0 cursor-pointer`}
+                                    className={`p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-amber-500 transition-colors shrink-0 cursor-pointer`}
                                     title="Remover dos favoritos"
                                   >
-                                    <Heart className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
+                                    <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" />
                                   </button>
                                 </div>
                               );
@@ -2771,7 +4998,7 @@ export default function App() {
                               className="p-1 rounded-full bg-white/20 hover:bg-white/30 text-white transition-colors cursor-pointer"
                               title={favoriteFolders.includes(cat.id) ? "Remover pasta dos favoritos" : "Adicionar pasta aos favoritos"}
                             >
-                              <Heart className={`w-3.5 h-3.5 ${favoriteFolders.includes(cat.id) ? 'fill-rose-500 text-rose-500' : 'text-white'}`} />
+                              <Star className={`w-3.5 h-3.5 ${favoriteFolders.includes(cat.id) ? 'fill-amber-500 text-amber-500' : 'text-white'}`} />
                             </button>
                             <span className="text-[8px] font-black uppercase tracking-widest bg-white/20 px-1.5 py-0.5 rounded-full shrink-0">
                               {categoryPresets.length} {categoryPresets.length === 1 ? 'Livro' : 'Livros'}
@@ -2813,10 +5040,10 @@ export default function App() {
                                   e.preventDefault();
                                   toggleFavoriteEbook(preset.key);
                                 }}
-                                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-rose-500 transition-colors cursor-pointer"
+                                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-amber-500 transition-colors cursor-pointer"
                                 title={favoriteEbooks.includes(preset.key) ? "Remover dos favoritos" : "Adicionar aos favoritos"}
                               >
-                                <Heart className={`w-3.5 h-3.5 ${favoriteEbooks.includes(preset.key) ? 'fill-rose-500 text-rose-500' : 'text-slate-400'}`} />
+                                <Star className={`w-3.5 h-3.5 ${favoriteEbooks.includes(preset.key) ? 'fill-amber-500 text-amber-500' : 'text-slate-400'}`} />
                               </button>
                             </div>
                           ))}
@@ -2987,6 +5214,102 @@ export default function App() {
                   </div>
                 )}
 
+                {/* "Pacientes também procuram" Section */}
+                {(() => {
+                  const similarRecs = getSimilarRecommendations(searchQuery, filteredPresets);
+                  if (similarRecs.length === 0) return null;
+                  return (
+                    <div className="mt-8 space-y-4 animate-in fade-in duration-300">
+                      <div className="flex items-center gap-2 border-b border-slate-150/60 dark:border-slate-800/60 pb-2.5">
+                        <Pill className="w-4 h-4 text-indigo-500" />
+                        <h3 className={`text-xs font-extrabold uppercase tracking-wider ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-600'}`}>
+                          pacientes também procuram
+                        </h3>
+                      </div>
+                      
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {similarRecs.map((preset) => {
+                          const presetCat = preset.category || '';
+                          let bgGrad = 'from-indigo-500 to-purple-600';
+                          if (presetCat === 'hipertensao') bgGrad = 'from-emerald-500 to-teal-600';
+                          else if (presetCat === 'diabetes') bgGrad = 'from-blue-500 to-indigo-600';
+                          else if (presetCat === 'colesterol') bgGrad = 'from-amber-500 to-orange-600';
+
+                          return (
+                            <div 
+                              key={`rec-${preset.key}`}
+                              className={`rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} p-5 flex flex-col justify-between gap-5 transition-all shadow-md hover:shadow-xl hover:scale-[1.01]`}
+                            >
+                              <div className="flex gap-4 items-start">
+                                {/* Decorative Book Cover */}
+                                <div className={`w-20 h-28 rounded-xl bg-gradient-to-br ${bgGrad} shadow-md shrink-0 flex flex-col justify-between p-2.5 text-white relative overflow-hidden`}>
+                                  <div className="absolute right-0 bottom-0 w-12 h-12 bg-white/10 rounded-tl-full"></div>
+                                  <span className="text-[8px] font-black uppercase tracking-widest bg-white/20 px-1 py-0.5 rounded text-center block">
+                                    MediQuês
+                                  </span>
+                                  <div className="space-y-0.5">
+                                    <p className="text-xs font-black tracking-tight leading-none text-center">
+                                      {getPresetDisplayName(preset.key, true, preset.medicineName)}
+                                    </p>
+                                    <p className="text-[7px] text-white/80 text-center uppercase tracking-widest font-bold">
+                                      Guia Ilustrado
+                                    </p>
+                                  </div>
+                                  <div className="flex justify-center">
+                                    <Pill className="w-4 h-4 text-white/90" />
+                                  </div>
+                                </div>
+
+                                {/* Book Info */}
+                                <div className="space-y-1.5 flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <h4 className={`text-sm font-extrabold ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-900'} leading-none truncate`}>
+                                      {getPresetDisplayName(preset.key, accessibilitySettings.simpleLanguage, preset.medicineName)}
+                                    </h4>
+                                  </div>
+                                  <p className="text-xs text-slate-400 font-medium leading-snug line-clamp-2">
+                                    {getPresetDisplaySubtitle(preset.key, accessibilitySettings.simpleLanguage, preset.subtitle)}
+                                  </p>
+
+                                  {/* Included Topics Bullet hints */}
+                                  <div className="space-y-1 pt-1.5">
+                                    <span className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest block">Conteúdo Incluído:</span>
+                                    <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+                                      {['Como funciona', 'Efeitos comuns', 'Dicas de segurança', 'Infográfico resumo'].map((topic, tIdx) => (
+                                        <div key={tIdx} className="flex items-center gap-1 text-[10px] text-slate-500 font-medium">
+                                          <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
+                                          <span className="truncate">{topic}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Action Button */}
+                              <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-3 mt-1">
+                                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest flex items-center gap-1">
+                                  <BookOpen className="w-3.5 h-3.5" />
+                                  Recomendado
+                                </span>
+                                <button
+                                  onClick={() => {
+                                    setViewingTagResults(false);
+                                    handlePresetSelect(preset.key);
+                                  }}
+                                  className={`px-4 py-2 rounded-xl text-xs font-bold text-white transition-all hover:scale-[1.03] active:scale-[0.97] cursor-pointer bg-gradient-to-r ${bgGrad}`}
+                                >
+                                  Ler Livrinho
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Help with custom medicine in tag page */}
                 {filteredPresets.length > 0 && (
                   <div className={`p-6 rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm mt-6`}>
@@ -3015,6 +5338,14 @@ export default function App() {
                 )}
               </>
             )}
+          </div>
+        ) : (selectedPreset && !currentEbook) || (isLoading && !currentEbook) ? (
+          /* Show loading spinner while loading a preset */
+          <div className="flex-1 flex flex-col items-center justify-center p-8">
+            <RefreshCw className={`w-10 h-10 animate-spin ${styleConfig.comfortDark ? 'text-indigo-400' : 'text-blue-600'}`} />
+            <p className={`text-xs font-bold mt-4 ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+              Montando seu guia de saúde ilustrado...
+            </p>
           </div>
         ) : !currentEbook ? (
           /* Disease Folders Explorer View in Center when no medication is active */
@@ -3097,6 +5428,8 @@ export default function App() {
                           setSelectedCategory(cat.id);
                           setIsCustomMode(false);
                           setShowHome(false);
+                          setSelectedPreset('');
+                          setCurrentEbook(null);
                         }}
                         className={`text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 hover:underline cursor-pointer ${
                           styleConfig.comfortDark ? 'text-indigo-400' : 'text-indigo-650'
@@ -3109,6 +5442,84 @@ export default function App() {
                   </div>
                 );
               })}
+            </div>
+
+            {/* Medication Reminders Dashboard Section */}
+            <div className={`p-6 rounded-2xl border ${styleConfig.cardBg} ${styleConfig.cardBorder} space-y-4 shadow-sm text-left`}>
+              <div className="flex items-center justify-between border-b pb-3 border-slate-100 dark:border-slate-800">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-indigo-500 animate-pulse" />
+                  <h3 className={`text-xs font-bold uppercase tracking-widest block ${styleConfig.comfortDark ? 'text-slate-100' : 'text-slate-800'}`}>
+                    ⏱️ Meus Lembretes de Horários
+                  </h3>
+                </div>
+                <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">
+                  {Object.keys(reminders).length} {Object.keys(reminders).length === 1 ? 'Lembrete' : 'Lembretes'}
+                </span>
+              </div>
+
+              {Object.keys(reminders).length === 0 ? (
+                <div className="text-center py-6 space-y-1">
+                  <p className={`text-xs font-semibold ${styleConfig.comfortDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Nenhum lembrete configurado ainda.
+                  </p>
+                  <p className="text-[11px] text-slate-400 max-w-lg mx-auto">
+                    Ao ler as páginas de posologia (como tomar) de qualquer e-book de medicamento, você pode definir um horário diário de lembrete para receber o aviso.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  {Object.entries(reminders).map(([key, time]) => {
+                    const index = key.indexOf('_');
+                    const medicineName = index !== -1 ? key.substring(0, index) : 'Medicamento';
+                    const sectionTitle = index !== -1 ? key.substring(index + 1) : key;
+
+                    return (
+                      <div 
+                        key={key} 
+                        className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 shadow-xs hover:shadow-sm transition-all ${
+                          styleConfig.comfortDark 
+                            ? 'bg-slate-900/40 border-slate-800 hover:border-slate-700' 
+                            : 'bg-slate-50/50 border-slate-150 hover:bg-slate-50 hover:border-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className={`p-2.5 rounded-lg shrink-0 ${
+                            styleConfig.comfortDark ? 'bg-slate-850 text-indigo-400 border border-slate-800' : 'bg-indigo-50/60 text-indigo-600 border border-indigo-100/50'
+                          }`}>
+                            <Pill className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="min-w-0">
+                            <h4 className={`text-xs font-bold truncate ${styleConfig.comfortDark ? 'text-slate-200' : 'text-slate-700'}`}>
+                              {sectionTitle}
+                            </h4>
+                            <p className="text-[10px] text-slate-400 truncate">
+                              Remédio: {medicineName}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className={`px-2 py-1 text-xs font-extrabold rounded-lg border flex items-center gap-1 shadow-xs ${
+                            styleConfig.comfortDark 
+                              ? 'bg-slate-900 border-slate-800 text-indigo-400' 
+                              : 'bg-white border-indigo-100 text-indigo-600'
+                          }`}>
+                            <Clock className="w-3 h-3" />
+                            {time}
+                          </div>
+                          <button
+                            onClick={() => saveReminder(key, '')}
+                            className="p-1.5 text-slate-400 hover:text-rose-500 hover:bg-rose-50/50 dark:hover:bg-rose-950/20 rounded-lg transition-all cursor-pointer border border-transparent hover:border-rose-100 dark:hover:border-rose-950"
+                            title="Remover lembrete"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Help with custom medicine */}
@@ -3143,20 +5554,6 @@ export default function App() {
             {/* Header / Workspace controls */}
             <header className={`flex flex-col sm:flex-row gap-4 items-center justify-between px-4 py-2 border-b ${styleConfig.subHeaderBorder} ${styleConfig.subHeaderBg} rounded-2xl mb-4 md:mb-6 transition-all duration-300`}>
               <div className="flex items-center gap-3">
-                {!sidebarOpen && (
-                  <button
-                    id="header-open-sidebar-btn"
-                    onClick={() => setSidebarOpen(true)}
-                    className={`p-2 rounded-xl border transition-all cursor-pointer flex items-center justify-center shrink-0 ${
-                      styleConfig.comfortDark 
-                        ? 'border-slate-800 bg-slate-900 text-indigo-400 hover:bg-slate-800 hover:text-indigo-300' 
-                        : 'border-slate-200 bg-white text-indigo-600 hover:bg-slate-50 shadow-sm hover:text-indigo-700'
-                    }`}
-                    title="Abrir menu de busca e guias"
-                  >
-                    <Menu className="w-4 h-4 animate-in fade-in duration-200" />
-                  </button>
-                )}
                 <button
                   onClick={() => {
                     setShowHome(true);
@@ -3492,8 +5889,41 @@ export default function App() {
                                     {section.title}
                                   </h4>
                                 </div>
-                                <div className="flex-1">
-                                  {renderSectionContent(section.content, styleConfig, accessibilitySettings)}
+                                <div className="flex-1 flex flex-col justify-between">
+                                  <div>
+                                    {renderSectionContent(section.content, styleConfig, accessibilitySettings)}
+                                  </div>
+                                  {isPosologySection(section, page) && (
+                                    <div className="mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800/60 flex items-center justify-between gap-2">
+                                      <div className="flex items-center gap-1">
+                                        <Clock className="w-3 h-3 text-indigo-500" />
+                                        <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                                          Lembrete:
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-1.5">
+                                        <input
+                                          type="time"
+                                          value={reminders[`${currentEbook?.medicineName || 'custom'}_${section.title}`] || ''}
+                                          onChange={(e) => saveReminder(`${currentEbook?.medicineName || 'custom'}_${section.title}`, e.target.value)}
+                                          className={`px-1.5 py-0.5 text-[10px] rounded border focus:ring-1 focus:ring-indigo-500 focus:outline-hidden ${
+                                            styleConfig.comfortDark 
+                                              ? 'bg-slate-900 border-slate-800 text-slate-200' 
+                                              : 'bg-white border-slate-200 text-slate-700 shadow-xs'
+                                          }`}
+                                        />
+                                        {reminders[`${currentEbook?.medicineName || 'custom'}_${section.title}`] && (
+                                          <button
+                                            onClick={() => saveReminder(`${currentEbook?.medicineName || 'custom'}_${section.title}`, '')}
+                                            className="px-1.5 py-0.5 text-[9px] font-bold text-rose-500 hover:text-rose-600 bg-rose-50 dark:bg-rose-950/25 rounded hover:scale-[1.02] transition-all cursor-pointer border border-rose-100/50"
+                                            title="Limpar lembrete"
+                                          >
+                                            Limpar
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               </section>
                             );
@@ -3621,7 +6051,40 @@ export default function App() {
                                       </button>
                                     </div>
                                   ) : (
-                                    renderSectionContent(section.content, styleConfig, accessibilitySettings)
+                                    <>
+                                      {renderSectionContent(section.content, styleConfig, accessibilitySettings)}
+                                      {isPosologySection(section, page) && (
+                                        <div className="mt-3.5 pt-3 border-t border-slate-100 dark:border-slate-800/60 flex flex-wrap items-center justify-between gap-3 animate-in fade-in slide-in-from-top-1 duration-200">
+                                          <div className="flex items-center gap-1.5">
+                                            <Clock className="w-3.5 h-3.5 text-indigo-500" />
+                                            <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                                              Definir lembrete diário:
+                                            </span>
+                                          </div>
+                                          <div className="flex items-center gap-2">
+                                            <input
+                                              type="time"
+                                              value={reminders[`${currentEbook?.medicineName || 'custom'}_${section.title}`] || ''}
+                                              onChange={(e) => saveReminder(`${currentEbook?.medicineName || 'custom'}_${section.title}`, e.target.value)}
+                                              className={`px-2 py-1 text-xs rounded-lg border focus:ring-1 focus:ring-indigo-500 focus:outline-hidden ${
+                                                styleConfig.comfortDark 
+                                                  ? 'bg-slate-900 border-slate-800 text-slate-200' 
+                                                  : 'bg-white border-slate-200 text-slate-700 shadow-xs'
+                                              }`}
+                                            />
+                                            {reminders[`${currentEbook?.medicineName || 'custom'}_${section.title}`] && (
+                                              <button
+                                                onClick={() => saveReminder(`${currentEbook?.medicineName || 'custom'}_${section.title}`, '')}
+                                                className="px-2 py-1 text-[10px] font-bold text-rose-500 hover:text-rose-600 bg-rose-50 dark:bg-rose-950/20 rounded-lg hover:scale-[1.02] transition-all cursor-pointer border border-rose-100/50 dark:border-rose-950/50"
+                                                title="Limpar lembrete"
+                                              >
+                                                Limpar
+                                              </button>
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </>
                                   )}
                                 </div>
                               </section>
@@ -4175,6 +6638,237 @@ export default function App() {
           )}
         </>
       )}
+
+      {/* Active Alarm Trigger Popup Modal */}
+      {activeAlarm && (
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[100] flex items-center justify-center p-4 animate-in fade-in duration-300">
+          <div className="bg-white dark:bg-slate-900 border-2 border-indigo-500 rounded-3xl max-w-md w-full p-6 md:p-8 shadow-2xl relative z-10 animate-in zoom-in-95 duration-300 text-left">
+            <div className="text-center space-y-4">
+              {/* Pulsing ring bell */}
+              <div className="w-20 h-20 rounded-full bg-indigo-50 dark:bg-slate-800 flex items-center justify-center mx-auto border-2 border-indigo-200 dark:border-indigo-800 animate-bounce">
+                <Bell className="w-10 h-10 text-indigo-600 dark:text-indigo-400" />
+              </div>
+
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 px-2.5 py-1 rounded-full border border-indigo-100 dark:border-indigo-900/30">
+                  ⏰ HORA DA SUA DOSE ({activeAlarm.time})
+                </span>
+                <h3 className="text-xl font-black text-slate-900 dark:text-slate-50 mt-3.5">
+                  {activeAlarm.medicineName}
+                </h3>
+                <p className="text-sm font-extrabold text-indigo-600 dark:text-indigo-400 mt-1">
+                  Dosagem: {activeAlarm.dose}
+                </p>
+              </div>
+
+              {/* Instructions summary */}
+              {activeAlarm.instructions && (
+                <div className="p-4 bg-slate-50 dark:bg-slate-950/60 rounded-xl border border-slate-100 dark:border-slate-850 text-xs font-semibold text-slate-500 dark:text-slate-400 leading-relaxed">
+                  📖 {activeAlarm.instructions}
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div className="pt-2">
+                <button
+                  onClick={async () => {
+                    await logDoseTaken(activeAlarm.medicineName, activeAlarm.dose, activeAlarm.time);
+                    setActiveAlarm(null);
+                  }}
+                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl text-sm transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-indigo-600/20 cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <Check className="w-4 h-4" />
+                  Confirmar que Tomei a Dose 👍
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Authentication Modal */}
+      {authModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-55 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div 
+            className="fixed inset-0" 
+            onClick={() => {
+              if (!authSubmitting) setAuthModalOpen(false);
+            }} 
+          />
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl max-w-sm w-full p-6 md:p-8 shadow-2xl relative z-10 animate-in zoom-in-95 duration-200">
+            
+            {/* Close Button */}
+            <button
+              disabled={authSubmitting}
+              onClick={() => setAuthModalOpen(false)}
+              className="absolute top-4 right-4 p-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <span className="sr-only">Fechar</span>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+
+            {/* Header / Tabs */}
+            <div className="text-center mb-6">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white font-extrabold flex items-center justify-center text-xl shadow-md mx-auto mb-3">
+                M
+              </div>
+              <h3 className="text-lg font-black text-slate-900 dark:text-slate-50">
+                {authModalTab === 'login' ? 'Bem-vindo de Volta' : 'Criar sua Conta'}
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {authModalTab === 'login' 
+                  ? 'Conecte-se para sincronizar seus favoritos na nuvem.' 
+                  : 'Sua leitura, favoritos e progresso salvos em qualquer lugar.'}
+              </p>
+            </div>
+
+            {/* Error and Success states */}
+            {authError && (
+              <div className="p-3 mb-4 bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/30 text-rose-650 dark:text-rose-400 text-xs font-bold rounded-xl text-center">
+                ⚠️ {authError}
+              </div>
+            )}
+            {authSuccess && (
+              <div className="p-3 mb-4 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30 text-emerald-700 dark:text-emerald-400 text-xs font-bold rounded-xl text-center flex items-center justify-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                {authSuccess}
+              </div>
+            )}
+
+            {/* Form */}
+            <form onSubmit={authModalTab === 'login' ? handleLogin : handleSignUp} className="space-y-4">
+              {authModalTab === 'signup' && (
+                <div>
+                  <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block mb-1.5">
+                    Nome Completo
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={authSubmitting}
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    placeholder="Seu Nome Completo"
+                    className="w-full px-4 py-3 rounded-xl text-xs bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-800 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/10 transition-all placeholder-slate-400"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block mb-1.5">
+                  Endereço de E-mail
+                </label>
+                <input
+                  type="email"
+                  required
+                  disabled={authSubmitting}
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="seuemail@exemplo.com"
+                  className="w-full px-4 py-3 rounded-xl text-xs bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-800 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/10 transition-all placeholder-slate-400"
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block mb-1.5">
+                  Sua Senha
+                </label>
+                <input
+                  type="password"
+                  required
+                  disabled={authSubmitting}
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full px-4 py-3 rounded-xl text-xs bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-800 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/10 transition-all placeholder-slate-400"
+                />
+              </div>
+
+              {authModalTab === 'signup' && (
+                <div>
+                  <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block mb-1.5">
+                    Confirmar Senha
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    disabled={authSubmitting}
+                    value={authConfirmPassword}
+                    onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-4 py-3 rounded-xl text-xs bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-800 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/10 transition-all placeholder-slate-400"
+                  />
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authSubmitting}
+                className="w-full py-3.5 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-indigo-600/10 mt-2"
+              >
+                {authSubmitting ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Processando...
+                  </>
+                ) : (
+                  authModalTab === 'login' ? 'Entrar na Conta' : 'Criar minha Conta'
+                )}
+              </button>
+            </form>
+
+            {/* Divider */}
+            <div className="relative my-5 flex items-center justify-center">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-200 dark:border-slate-800"></div>
+              </div>
+              <span className="relative bg-white dark:bg-slate-900 px-3 text-[10px] uppercase font-black tracking-widest text-slate-400 dark:text-slate-500">
+                ou continue com
+              </span>
+            </div>
+
+            {/* Google Sign In Button */}
+            <button
+              type="button"
+              disabled={authSubmitting}
+              onClick={handleGoogleLogin}
+              className="w-full py-3 px-4 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-850 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2.5 cursor-pointer shadow-sm"
+            >
+              <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" width="24" height="24" xmlns="http://www.w3.org/2000/svg">
+                <g transform="matrix(1, 0, 0, 1, 0, 0)">
+                  <path d="M21.35,11.1H12v2.7h5.38c-0.24,1.28 -0.96,2.37 -2.04,3.1v2.57h3.3c1.93,-1.78 3.04,-4.4 3.04,-7.49C21.68,11.91 21.56,11.47 21.35,11.1z" fill="#4285F4" />
+                  <path d="M12,20.8c2.38,0 4.38,-0.79 5.84,-2.13l-3.3,-2.57c-0.91,0.61 -2.08,0.98 -3.39,0.98 -2.61,0 -4.82,-1.76 -5.61,-4.13H2.12v2.65C3.59,18.57 7.55,20.8 12,20.8z" fill="#34A853" />
+                  <path d="M6.39,12.95c-0.2,-0.61 -0.31,-1.26 -0.31,-1.95s0.11,-1.34 0.31,-1.95V6.4H2.12C1.41,7.81 1,9.41 1,11c0,1.59 0.41,3.19 1.12,4.6l3.3,-2.57C5.7,14.33 5.7,13.62 6.39,12.95z" fill="#FBBC05" />
+                  <path d="M12,5.18c1.3,0 2.46,0.45 3.38,1.32l2.53,-2.53C16.37,2.51 14.38,1.2 12,1.2c-4.45,0 -8.41,2.23 -9.88,5.2L5.42,9.05C6.21,6.68 8.42,5.18 12,5.18z" fill="#EA4335" />
+                </g>
+              </svg>
+              Entrar com o Google
+            </button>
+
+            {/* Tab switch link */}
+            <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 text-center">
+              <span className="text-[11px] text-slate-400">
+                {authModalTab === 'login' ? 'Não tem uma conta?' : 'Já possui uma conta?'}
+              </span>
+              <button
+                disabled={authSubmitting}
+                onClick={() => {
+                  setAuthModalTab(authModalTab === 'login' ? 'signup' : 'login');
+                  setAuthError('');
+                  setAuthSuccess('');
+                }}
+                className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline ml-1 cursor-pointer"
+              >
+                {authModalTab === 'login' ? 'Cadastre-se grátis' : 'Faça login aqui'}
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

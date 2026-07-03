@@ -11,6 +11,220 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Guia aprofundado com termos técnicos e explicações científicas baseadas na Diretriz Brasileira de Hipertensão Arterial 2025 (DBHA 2025)
+const TECHNICAL_BRA_MEDICINE = {
+  "medicineName": "Bloqueadores de Angiotensina (BRAs)",
+  "subtitle": "Antagonistas seletivos do receptor AT1 da Angiotensina II",
+  "colorTheme": "emerald",
+  "category": "hipertensao",
+  "tags": ["pressão", "hipertensão", "losartana", "valsartana", "olmesartana", "coração", "rins"],
+  "pages": [
+    {
+      "pageNumber": 1,
+      "title": "DIRETRIZES DE BRAS E SARTANAS",
+      "description": "Classe de primeira linha recomendada pela Diretriz Brasileira de Hipertensão Arterial (DBHA 2025) para controle pressórico, cardioproteção e nefroproteção ativa.",
+      "sections": []
+    },
+    {
+      "pageNumber": 2,
+      "title": "REPRESENTANTES E POSOLOGIAS",
+      "description": "Veja abaixo as dosagens habituais recomendadas pelas diretrizes para alcance do bloqueio pleno do SRAA:",
+      "sections": [
+        {
+          "title": "Losartana Potássica",
+          "content": "• Posologia habitual: 50 a 100 mg por dia (fração única ou dividida de 12/12h).\n• Observação clínica: O primeiro representante da classe, amplamente utilizado no SUS.",
+          "icon": "Pill",
+          "type": "success"
+        },
+        {
+          "title": "Valsartana",
+          "content": "• Posologia habitual: 80 a 320 mg por dia (dose única diária).\n• Observação clínica: Alta seletividade ao receptor AT1, reduz significativamente a morbimortalidade cardiovascular.",
+          "icon": "Pill",
+          "type": "success"
+        },
+        {
+          "title": "Olmesartana Medoxomila",
+          "content": "• Posologia habitual: 20 a 40 mg por dia (dose única diária).\n• Observação clínica: Potente ação anti-hipertensiva sustentada por 24 horas.",
+          "icon": "Pill",
+          "type": "success"
+        },
+        {
+          "title": "Candesartana Cilexetila",
+          "content": "• Posologia habitual: 8 a 32 mg por dia (dose única diária).\n• Observação clínica: Ligação forte e dissociação extremamente lenta do receptor AT1.",
+          "icon": "Pill",
+          "type": "success"
+        },
+        {
+          "title": "Telmisartana",
+          "content": "• Posologia habitual: 20 a 80 mg por dia (dose única diária).\n• Observação clínica: Longa meia-vida plasmática (~24h) com propriedades parciais de agonista do PPAR-gama.",
+          "icon": "Pill",
+          "type": "success"
+        },
+        {
+          "title": "Irbesartana",
+          "content": "• Posologia habitual: 150 a 300 mg por dia (dose única diária).\n• Observação clínica: Indicada formalmente para retardar a progressão da nefropatia em pacientes diabéticos.",
+          "icon": "Pill",
+          "type": "success"
+        }
+      ]
+    },
+    {
+      "pageNumber": 3,
+      "title": "FISIOPATOLOGIA DO SRAA",
+      "description": "O Sistema Renina-Angiotensina-Aldosterona (SRAA) é o principal eixo endócrino regulador da hemodinâmica sistêmica e do equilíbrio hidrossalino:",
+      "sections": [
+        {
+          "title": "Angiotensina II",
+          "content": "Peptídeo vasoconstritor extremamente potente. Ao se ligar ao receptor AT1, causa vasoconstrição direta das artérias e estimula a hipertrofia celular vascular e cardíaca.",
+          "icon": "Activity",
+          "type": "warning"
+        },
+        {
+          "title": "Elevação da RVP",
+          "content": "A vasoconstrição eleva a resistência vascular periférica (RVP). Isso aumenta diretamente a pós-carga do ventrículo esquerdo, elevando a pressão arterial sistêmica.",
+          "icon": "Flame",
+          "type": "warning",
+          "isSubtopic": true
+        },
+        {
+          "title": "Aldosterona e Volemia",
+          "content": "A Angiotensina II estimula a secreção de aldosterona no córtex adrenal, induzindo a reabsorção de sódio e água nos rins, o que expande o volume de sangue.",
+          "icon": "Droplet",
+          "type": "warning",
+          "isSubtopic": true
+        }
+      ]
+    },
+    {
+      "pageNumber": 4,
+      "title": "MECANISMO DE BLOQUEIO AT1",
+      "description": "Mecanismo de ação farmacológica celular e benefícios descritos na DBHA 2025:",
+      "sections": [
+        {
+          "title": "Antagonismo Competitivo",
+          "content": "Os BRAs bloqueiam seletivamente os receptores AT1, impedindo que a Angiotensina II se ligue às células musculares lisas dos vasos e ao coração.",
+          "icon": "Lock",
+          "type": "success"
+        },
+        {
+          "title": "Vasodilatação Sistêmica",
+          "content": "O bloqueio do receptor AT1 promove o relaxamento direto do leito arterial, resultando em diminuição da resistência vascular periférica e redução da pressão arterial.",
+          "icon": "Activity",
+          "type": "success",
+          "isSubtopic": true
+        },
+        {
+          "title": "Nefroproteção e Cardioproteção",
+          "content": "Ao dilatar a arteríola eferente renal, reduz a pressão intraglomerular e a microalbuminúria. Além disso, previne o remodelamento e a hipertrofia ventricular esquerda.",
+          "icon": "Heart",
+          "type": "success"
+        }
+      ]
+    },
+    {
+      "pageNumber": 5,
+      "title": "CONTRAINDICAÇÕES E ALERTAS",
+      "description": "Diretrizes de segurança cruciais baseadas em evidências de alta certeza científica:",
+      "sections": [
+        {
+          "title": "Gestação (Contraindicação Absoluta)",
+          "content": "Contraindicação formal Classe I, Evidência A. O uso na gravidez causa teratogenicidade grave, levando a disfunção renal fetal, hipoplasia pulmonar, deformações cranianas e óbito fetal.",
+          "icon": "XCircle",
+          "type": "warning"
+        },
+        {
+          "title": "Monitoramento de Potássio e Creatinina",
+          "content": "O uso de BRAs em pacientes com Doença Renal Crônica (DRC) avançada pode causar hipercalemia (potássio elevado) e redução transitória da TFG. É obrigatória a dosagem de potássio e creatinina em até duas semanas após início/ajuste.",
+          "icon": "AlertTriangle",
+          "type": "warning"
+        },
+        {
+          "title": "Associação Proibida: BRA + IECA",
+          "content": "A combinação de BRA com IECA é formalmente contraindicada. Ensaios clínicos demonstraram que o duplo bloqueio aumenta drasticamente os riscos de injúria renal aguda e hipercalemia, sem benefícios cardiovasculares adicionais.",
+          "icon": "ShieldAlert",
+          "type": "warning"
+        }
+      ]
+    },
+    {
+      "pageNumber": 6,
+      "title": "INTERAÇÕES MEDICAMENTOSAS",
+      "description": "Interações importantes descritas nos capítulos de tratamento farmacológico:",
+      "sections": [
+        {
+          "title": "Anti-inflamatórios Não Esteroidais (AINEs)",
+          "content": "AINEs (como Ibuprofeno, Diclofenaco e Nimesulida) bloqueiam as prostaglandinas renais, causando vasoconstrição renal. Isso reduz o efeito anti-hipertensivo do BRA e eleva substancialmente o risco de insuficiência renal aguda.",
+          "icon": "XCircle",
+          "type": "warning"
+        },
+        {
+          "title": "Espironolactona e Suplementos",
+          "content": "O uso concomitante com espironolactona (antagonista da aldosterona) ou suplementação de potássio aumenta muito o risco de hipercalemia severa. Requer vigilância estrita.",
+          "icon": "AlertTriangle",
+          "type": "warning"
+        },
+        {
+          "title": "Lítio",
+          "content": "Pode reduzir a excreção renal do lítio, elevando seus níveis séricos e induzindo toxicidade grave. Requer ajuste posológico e monitoramento laboratorial.",
+          "icon": "AlertTriangle",
+          "type": "warning"
+        }
+      ]
+    },
+    {
+      "pageNumber": 7,
+      "title": "METAS E COMBINAÇÕES 2025",
+      "description": "Metas terapêuticas e estratégias de tratamento estabelecidas na Diretriz de 2025:",
+      "sections": [
+        {
+          "title": "Meta Pressórica Geral (< 130/80 mmHg)",
+          "content": "A DBHA 2025 estabelece como meta terapêutica para todos os hipertensos manter a PA < 130/80 mmHg (Recomendação Forte, Evidência Alta), desde que bem tolerada.",
+          "icon": "Activity",
+          "type": "success"
+        },
+        {
+          "title": "Terapia Combinada como Início Padrão",
+          "content": "Recomenda-se iniciar o tratamento da hipertensão com associação dupla de medicamentos (por exemplo, BRA + BCC ou BRA + DIU) em dose fixa (comprimido único), acelerando o controle e a adesão.",
+          "icon": "Pill",
+          "type": "success"
+        },
+        {
+          "title": "Uso de MAPA e MRPA",
+          "content": "A confirmação do controle pressórico e alcance de metas deve ser validada por meio de monitorização residencial (MRPA) ou ambulatorial (MAPA), afastando fenótipos como hipertensão mascarada.",
+          "icon": "Clock",
+          "type": "info"
+        }
+      ]
+    },
+    {
+      "pageNumber": 8,
+      "title": "SÍNTESE CLÍNICA",
+      "description": "Confira o sumário executivo das diretrizes práticas de BRAs segundo a DBHA 2025:",
+      "sections": [
+        {
+          "title": "DIAGNÓSTICO E ALVOS",
+          "content": "• Meta terapêutica geral de PA < 130/80 mmHg.\n• Indicação preferencial de terapia combinada em dose fixa como primeiro passo.",
+          "icon": "Activity",
+          "type": "info"
+        },
+        {
+          "title": "VIGILÂNCIA LAB",
+          "content": "• Dosagem anual de Creatinina e Potássio sérico.\n• Risco elevado de hipercalemia na DRC avançada ou se associado a Espironolactona.",
+          "icon": "ShieldAlert",
+          "type": "warning"
+        },
+        {
+          "title": "CONTRAINDICAÇÕES",
+          "content": "• Gestação (Absoluta): risco de teratogenicidade e óbito fetal.\n• Evitar uso concomitante com AINEs e associação com IECAs.",
+          "icon": "XCircle",
+          "type": "warning"
+        }
+      ],
+      "isInfographic": true
+    }
+  ]
+};
+
 // Initial list of pre-rendered, high-quality, fully simplified Portuguese guides
 // for instant loading of common medicines.
 const PRESET_MEDICINES: Record<string, any> = {
@@ -23,30 +237,48 @@ const PRESET_MEDICINES: Record<string, any> = {
     "pages": [
       {
         "pageNumber": 1,
-        "title": "Guia Prático das Sartanas",
-        "description": "Remédios que terminam com \"Sartana\" (como Losartana) protegem o coração e evitam que a pressão suba, relaxando os vasos de sangue.",
+        "title": "Guia prático das “Sartanas”BRAs",
+        "description": "Os Bloqueadores dos Receptores de Angiotensina II, carinhosamente chamados de BRAs ou \"sartanas\", são medicamentos amplamente utilizados para tratar a pressão alta e proteger órgãos vitais como o coração e os rins.",
         "sections": []
       },
       {
         "pageNumber": 2,
-        "title": "Remédios e Dosagens Comuns",
-        "description": "Entenda as doses comuns e horários habituais recomendados para estes remédios de uso diário.",
+        "title": "Quem são",
+        "description": "Veja abaixo os principais representantes da classe e as dosagens recomendadas:",
         "sections": [
           {
-            "title": "Losartana (Cozaar)",
-            "content": "• Dosagem comum: 50 mg a 100 mg\n• Como tomar: Uma vez ao dia (geralmente pela manhã) ou dividida de 12 em 12 horas.",
+            "title": "Losartana",
+            "content": "* Nome comercial: Cozaar; Lotar - associado a Anlodipino\n* Posologia: 50 - 100 mg; Uma vez ao dia ou de 12 em 12 horas.",
             "icon": "Pill",
             "type": "success"
           },
           {
-            "title": "Valsartana (Diovan)",
-            "content": "• Dosagem comum: 80 mg a 320 mg\n• Como tomar: Uma vez ao dia, de preferência no mesmo horário todos os dias.",
+            "title": "Valsartana",
+            "content": "* Nome comercial: Diovan, Ex-forge - associado a Anlodipino\n* Posologia: 80 - 320 mg; uma vez ao dia",
             "icon": "Pill",
             "type": "success"
           },
           {
-            "title": "Olmesartana (Benicar)",
-            "content": "• Dosagem comum: 20 mg a 40 mg\n• Como tomar: Uma vez ao dia.",
+            "title": "Irbesartana",
+            "content": "* Nome comercial: Aprovel\n* Posologia: 150 - 300 mg; Uma  vez ao dia",
+            "icon": "Pill",
+            "type": "success"
+          },
+          {
+            "title": "Candesartana",
+            "content": "* Nome comercial: Atacand/Blopress\n* Posologia: 8 - 32 mg; Uma vez ao dia",
+            "icon": "Pill",
+            "type": "success"
+          },
+          {
+            "title": "Olmesartana",
+            "content": "* Nome comercial: Benicar/Olmetec\n* Posologia: 20 - 40 mg; Uma vez ao dia",
+            "icon": "Pill",
+            "type": "success"
+          },
+          {
+            "title": "Telmisartana",
+            "content": "* Nome comercial: Micardis; Twynsta - associado a Anlodipino\n* Posologia: 20 - 80 mg; Uma vez ao dia",
             "icon": "Pill",
             "type": "success"
           }
@@ -54,92 +286,169 @@ const PRESET_MEDICINES: Record<string, any> = {
       },
       {
         "pageNumber": 3,
-        "title": "Como Funciona o Remédio",
-        "description": "Uma analogia simples nos ajuda a entender por que a pressão alta sobrecarrega nosso coração e como o remédio ajuda.",
+        "title": "Entendendo a pressão alta",
+        "description": "Vamos pensar que os vasos sanguíneos são como uma mangueira",
         "sections": [
           {
-            "title": "A Mangueira Apertada",
-            "content": "Imagine que as suas veias e artérias são como uma mangueira de jardim. Se você apertar a ponta da mangueira, a água sai com muito mais força e violência, forçando todo o sistema. No corpo, isso é a pressão alta!",
+            "title": "Hormônio",
+            "content": "Existe um hormônio no corpo chamado Angiotensina II (dois), que quando entra em ação, faz duas coisas principais:",
+            "icon": "Activity",
+            "type": "warning"
+          },
+          {
+            "title": "Vasos apertados e mais estreitos",
+            "content": "Diz para os vasos fecharem e apertarem - como quando apertamos ou pisamos na mangueira de jardim - Aumentando a força e a pressão da água! (conhecido na medicina como vasoconstrição)",
+            "icon": "Flame",
+            "type": "warning",
+            "isSubtopic": true
+          },
+          {
+            "title": "Retenção de Líquido",
+            "content": "Diz para o corpo reter sal e água, aumentando a quantidade de líquido circulando no sangue ",
             "icon": "Droplet",
-            "type": "warning"
+            "type": "warning",
+            "isSubtopic": true
           },
           {
-            "title": "O Hormônio do Estreitamento",
-            "content": "O nosso próprio corpo produz um hormônio que funciona como uma mão invisível apertando essas mangueiras. É aí que as Sartanas entram.",
-            "icon": "AlertTriangle",
+            "title": "Pressão alta (hipertensão)",
+            "content": "O resultado desses dois mecanismos (cano apertado + aumento de líquido) é a pressão alta! ",
+            "icon": "ShieldAlert",
             "type": "warning"
+          }
+        ]
+      },
+      {
+        "pageNumber": 4,
+        "title": "Como o medicamento age?",
+        "description": "Veja abaixo como o medicamento funciona no seu organismo para proteger seu coração e seus rins:",
+        "sections": [
+          {
+            "title": "A Fechadura (Receptor)",
+            "content": "Para a angiotensina II ser ativada, ela precisa se encaixar em uma espécie de “fechadura” (conhecido na medicina como receptor), chamado Receptor da Angiotensina.",
+            "icon": "Lock",
+            "type": "success"
           },
           {
-            "title": "O Bloqueio do Aperto",
-            "content": "As Sartanas funcionam como um escudo protetor. Elas impedem que a mão invisível aperte a mangueira, mantendo as veias relaxadas, abertas e saudáveis.",
+            "title": "A Chave Falsa de Bloqueio",
+            "content": "O medicamento entra no organismo e funciona como uma chave falsa que se encaixa nessa fechadura, mas não consegue girar, apenas impedindo que a angiotensina II se encaixe.",
+            "icon": "Pill",
+            "type": "success"
+          },
+          {
+            "title": "Os vasos sanguíneos ficam relaxados e abertos",
+            "content": "Sem o encaixe do hormônio, os vasos não sofrem o aperto e permanecem mais relaxados e abertos (vasodilatação), diminuindo a força que o sangue precisa fazer.",
+            "icon": "Activity",
+            "type": "success",
+            "isSubtopic": true
+          },
+          {
+            "title": "O corpo retém menos sal e água",
+            "content": "O rim elimina o excesso de sal e água, diminuindo a quantidade total de líquido que circula pelo corpo.",
+            "icon": "Droplet",
+            "type": "success",
+            "isSubtopic": true
+          },
+          {
+            "title": "Alívio e Proteção dos Órgãos",
+            "content": "A melhora nesses dois mecanismos alivia coração, rins e outros órgãos de uma pressão alta que é extremamente prejudicial!",
             "icon": "Heart",
             "type": "success"
           }
         ]
       },
       {
-        "pageNumber": 4,
-        "title": "Cuidados e Efeitos Colaterais",
-        "description": "Preste atenção aos avisos de segurança importantes e saiba como reagir a tonturas comuns:",
+        "pageNumber": 5,
+        "title": "Efeitos colaterais",
+        "description": "Informações essenciais de segurança para o seu dia a dia:",
         "sections": [
           {
-            "title": "Gravidez: Alerta Máximo",
-            "content": "• Estes medicamentos não podem ser usados por grávidas ou mulheres que planejam engravidar, pois podem fazer mal ao bebê.",
-            "icon": "XCircle",
+            "title": "Restrições Importantes",
+            "content": "* Não pode usar na gravidez ou no planejamento da gravidez, pois pode afetar gravemente o desenvolvimento do bebê.\n* Não pode se associar com IECAs (Ex: Captopril, enalapril, ramipril).\n* Pode piorar a função renal no começo, mas volta ao normal e estabiliza com o tempo.\n* Risco de aumento do potássio (principalmente se já tiver doença renal crônica avançada ou em uso de espironolactona).",
+            "icon": "ShieldAlert",
             "type": "warning"
           },
           {
-            "title": "Tontura ao Levantar",
-            "content": "• É comum sentir tontura nos primeiros dias de uso, especialmente ao levantar rápido demais da cama ou cadeira. Levante-se com calma.",
-            "icon": "Activity",
-            "type": "warning"
-          }
-        ]
-      },
-      {
-        "pageNumber": 5,
-        "title": "Interações e Alertas",
-        "description": "Evite misturar ou combinar estes remédios para garantir que eles funcionem de forma segura e perfeita:",
-        "sections": [
-          {
-            "title": "Anti-inflamatórios",
-            "content": "• Remédios para dor como Ibuprofeno, Nimesulida ou Diclofenaco cortam o efeito do remédio de pressão alta e podem fazer sua pressão subir perigosamente.",
+            "title": "Tonturas e Alergias",
+            "content": "* Tontura leve: Ao levantar-se rapidamente, costuma aparecer nos primeiros dias. Levante-se devagar.\n* Alergia grave (rara): sintomas como inchaço no rosto, lábios ou língua, falta de ar.",
             "icon": "AlertTriangle",
             "type": "warning"
           },
           {
-            "title": "Bebidas Alcoólicas",
-            "content": "• O consumo excessivo de álcool pode potencializar a tontura causada pelo remédio, aumentando o risco de quedas.",
-            "icon": "XCircle",
+            "title": "Atendimento de Saúde",
+            "content": "Caso sinta algum dos sintomas listados acima ou outro novo sintoma a partir do uso de um novo medicamento, procure um médico o quanto antes!",
+            "icon": "ShieldAlert",
             "type": "warning"
           }
         ]
       },
       {
         "pageNumber": 6,
-        "title": "Infográfico de Resumo",
-        "description": "Confira abaixo as informações cruciais sobre as Sartanas de maneira rápida e descomplicada.",
+        "title": "Interações medicamentosas",
+        "description": "Abaixo estão algumas interações a serem evitadas durante o tratamento:",
         "sections": [
           {
-            "title": "MEDICAMENTOS",
-            "content": "• Losartana (50-100mg)\n• Valsartana (80-320mg)\n• Olmesartana (20-40mg)",
-            "icon": "Pill",
+            "title": "Anti-inflamatórios e IECAs",
+            "content": "* Anti-inflamatórios (Ex: ibuprofeno, cetoprofeno, nimesulida, diclofenaco): podem reduzir o efeito do remédio, provocando aumento da pressão.\n* Inibidores da enzima conversora de angiotensina - IECAs: Aumenta o risco dos efeitos adversos por agirem no mesmo sistema.",
+            "icon": "XCircle",
+            "type": "warning"
+          },
+          {
+            "title": "Lítio e Diuréticos",
+            "content": "* Lítio: Diminui a excreção do lítio,elevando a concentração dele no sangue.\n* Diuréticos poupadores de potássio (Ex: espironolactona): acúmulo excessivo de potássio no sangue pode causar fraqueza muscular, e em casos graves, arritmia.",
+            "icon": "AlertTriangle",
+            "type": "warning"
+          }
+        ]
+      },
+      {
+        "pageNumber": 7,
+        "title": "Recomendações e Avisos",
+        "description": "Orientações fundamentais para a sua segurança e saúde:",
+        "sections": [
+          {
+            "title": "Uso Seguro",
+            "content": "Comunique sempre seu médico sobre os seus medicamentos de uso, para que assim ele faça a melhor combinação disponível para o seu caso!",
+            "icon": "ThumbsUp",
             "type": "info"
           },
           {
-            "title": "A MANGUEIRA",
-            "content": "• Vasos apertados geram pressão alta. As Sartanas relaxam as artérias e protegem seu coração.",
+            "title": "Aviso Importante",
+            "content": "Este material tem caráter puramente educativo e informativo. As informações aqui contidas refletem as diretrizes médicas gerais e não substituem, em hipótese alguma, a consulta com o seu médico assistente. Nunca altere a dose, interrompa o uso ou inicie qualquer medicamento por conta própria. Cada organismo é único e o tratamento deve ser individualizado.",
+            "icon": "ShieldAlert",
+            "type": "warning"
+          }
+        ]
+      },
+      {
+        "pageNumber": 8,
+        "title": "Resumo Geral",
+        "description": "Parabéns por concluir esta leitura! Aqui está uma revisão rápida de tudo o que aprendemos sobre os medicamentos BRA (Sartanas):",
+        "sections": [
+          {
+            "title": "O que são?",
+            "content": "São os Bloqueadores dos Receptores da Angiotensina (como Losartana e Valsartana), usados para controlar a pressão arterial alta.",
+            "icon": "Pill",
+            "type": "success"
+          },
+          {
+            "title": "Como funcionam?",
+            "content": "Agem como uma “chave falsa” na “fechadura” (receptor) do hormônio que contrai os vasos sanguíneos. Com isso, os vasos relaxam e o corpo elimina o excesso de sal e água, reduzindo a pressão.",
+            "icon": "Activity",
+            "type": "success"
+          },
+          {
+            "title": "Por que tomar?",
+            "content": "Ao reduzir a pressão, eles protegem o seu coração contra infartos/derrames e salvaguardam os seus rins contra lesões a longo prazo.",
             "icon": "Heart",
             "type": "success"
           },
           {
-            "title": "CUIDADOS",
-            "content": "• Nunca use na gravidez.\n• Cuidado ao levantar rápido.\n• Evite misturar com anti-inflamatórios.",
+            "title": "Cuidados principais",
+            "content": "Monitore possíveis tonturas no início, faça exames de sangue periódicos (potássio e creatinina) e evite misturar com anti-inflamatórios.",
             "icon": "ShieldAlert",
             "type": "warning"
           }
-        ],
-        "isInfographic": true
+        ]
       }
     ]
   },
@@ -789,6 +1098,10 @@ async function startServer() {
       // If we have a preset matching this exactly and no custom text is pasted, return the preset!
       if (!text && PRESET_MEDICINES[lookupKey]) {
         console.log(`Returning preset medicine for key: ${lookupKey}`);
+        if (lookupKey === 'hipertensao_bra' && accessibilitySettings && !accessibilitySettings.simpleLanguage) {
+          console.log('Returning Technical BRA medicine (Diretriz 2025)');
+          return res.json(TECHNICAL_BRA_MEDICINE);
+        }
         return res.json(PRESET_MEDICINES[lookupKey]);
       }
 
@@ -796,6 +1109,10 @@ async function startServer() {
       if (!process.env.GEMINI_API_KEY) {
         // Fallback: If no API Key, return a placeholder preset or error
         if (PRESET_MEDICINES[lookupKey]) {
+          if (lookupKey === 'hipertensao_bra' && accessibilitySettings && !accessibilitySettings.simpleLanguage) {
+            console.log('Returning Technical BRA medicine (Diretriz 2025) fallback');
+            return res.json(TECHNICAL_BRA_MEDICINE);
+          }
           return res.json(PRESET_MEDICINES[lookupKey]);
         }
         return res.status(400).json({ 
@@ -805,7 +1122,7 @@ async function startServer() {
 
       console.log(`Analyzing customized medicine via Gemini: "${medicineName}"`);
 
-      const systemInstruction = `
+      let systemInstruction = `
 Você é um especialista em saúde pública brasileira, empatia e acessibilidade. Sua missão é traduzir bulas ou informações médicas complexas em um guia visual simples e amigável em formato de E-book (JSON), focado em pessoas com baixa escolaridade ou idosas que tomam muitos remédios.
 
 Regras de Simplificação Críticas:
@@ -824,6 +1141,27 @@ Regras de Simplificação Críticas:
    - 'Coffee' para alimentação, estômago, ou cansaço.
 5. Foco visual e empático: Diga claramente o que fazer se esquecer e avisos sobre não misturar com cachaça, cerveja ou outros remédios comuns.
 `;
+
+      if (accessibilitySettings && !accessibilitySettings.simpleLanguage) {
+        systemInstruction = `
+Você é um especialista em cardiologia e farmacologia médica clínica de acordo com as normas da Sociedade Brasileira de Cardiologia (SBC). Sua missão é produzir um guia médico aprofundado, científico e detalhado em formato de E-book (JSON) voltado a profissionais de saúde ou pacientes que demandem explicações científicas rigorosas e termos técnicos a partir da Diretriz Brasileira de Hipertensão Arterial de 2025 (DBHA 2025).
+
+Regras de Conteúdo Técnico Críticas:
+1. Utilize terminologia científica rigorosa e termos técnicos autênticos (ex: "antagonismo competitivo", "vasoconstrição", "resistência vascular periférica (RVP)", "remodelamento ventricular", "microalbuminúria", "nefropatia", "hiperkalemia", "TFG estimada", "teratogenicidade").
+2. Inclua metas pressóricas baseadas na DBHA 2025 (como meta pressórica padrão < 130/80 mmHg, terapia de associação dupla em dose fixa em comprimido único para hipertensão estágio 1 de risco moderado/alto e estágios 2 e 3, contraindicação formal de BRA + IECA, e monitorização de potássio/creatinina na doença renal crônica).
+3. Divida as orientações de forma sequencial em 5 a 8 páginas de e-book.
+4. Use apenas nomes de ícones do Lucide válidos, por exemplo:
+   - 'Clock' para horários, frequência de tomadas ou monitoramentos (MAPA/MRPA).
+   - 'AlertTriangle' ou 'ShieldAlert' para riscos de hipercalemia, AINEs ou contraindicações perigosas.
+   - 'Activity' para mecanismos de ação do SRAA ou efeitos adversos.
+   - 'Heart' para cardioproteção, desfechos cardiovasculares.
+   - 'Droplet' para volemia ou função renal.
+   - 'XCircle' ou 'CheckCircle2' para contraindicações absolutas (gravidez) ou associações contraindicadas (BRA+IECA).
+   - 'Pill' para posologias, doses habituais.
+   - 'Lock' para mecanismos de bloqueio dos receptores AT1.
+5. Foco em precisão científica e vigilância: Destaque a importância da depuração de creatinina, potássio sérico e interações farmacológicas severas.
+`;
+      }
 
       const prompt = `
 Crie um guia simplificado de e-book para o remédio: "${medicineName || 'Medicamento Solicitado'}".
@@ -916,9 +1254,9 @@ Gere um objeto JSON no formato exato especificado abaixo. Não inclua Markdown e
   });
 
   // Integrate Vite for Frontend routes in Development Mode
-  if (process.env.DISABLE_HMR === 'true' || process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === 'production') {
     // Serve static files from the pre-built 'dist' folder
-    const distPath = path.join(__dirname, 'dist');
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
